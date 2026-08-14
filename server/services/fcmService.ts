@@ -1,4 +1,4 @@
-import { db } from '../db';
+import { queryRow, queryRows, executeSql } from '../db';
 import { config } from '../config';
 
 export interface PushNotificationPayload {
@@ -8,32 +8,32 @@ export interface PushNotificationPayload {
 }
 
 // Register or update device push token for authenticated user
-export function registerDevicePushToken(userId: string, token: string, platform: string = 'android') {
+export async function registerDevicePushToken(userId: string, token: string, platform: string = 'android') {
   if (!userId || !token) return;
   const now = new Date().toISOString();
   const id = `tok-${Date.now()}-${token.substring(0, 8)}`;
 
   // Upsert token
-  const existing = db.prepare('SELECT id FROM device_push_tokens WHERE token = ?').get(token) as any;
+  const existing = await queryRow<any>('SELECT id FROM device_push_tokens WHERE token = ?', [token]);
   if (existing) {
-    db.prepare('UPDATE device_push_tokens SET user_id = ?, platform = ?, updated_at = ? WHERE id = ?').run(
+    await executeSql('UPDATE device_push_tokens SET user_id = ?, platform = ?, updated_at = ? WHERE id = ?', [
       userId,
       platform,
       now,
-      existing.id
-    );
+      existing.id,
+    ]);
   } else {
-    db.prepare(`
+    await executeSql(`
       INSERT INTO device_push_tokens (id, user_id, token, platform, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?)
-    `).run(id, userId, token, platform, now, now);
+    `, [id, userId, token, platform, now, now]);
   }
 }
 
 // Remove invalid or unregistered token
-export function removeDevicePushToken(token: string) {
+export async function removeDevicePushToken(token: string) {
   if (!token) return;
-  db.prepare('DELETE FROM device_push_tokens WHERE token = ?').run(token);
+  await executeSql('DELETE FROM device_push_tokens WHERE token = ?', [token]);
 }
 
 // Dispatch push notification to all active devices of a user
@@ -41,9 +41,7 @@ export async function sendUserPushNotification(
   userId: string,
   payload: PushNotificationPayload
 ): Promise<{ sentCount: number; failureCount: number }> {
-  const tokens = db
-    .prepare('SELECT token FROM device_push_tokens WHERE user_id = ?')
-    .all(userId) as { token: string }[];
+  const tokens = await queryRows<{ token: string }>('SELECT token FROM device_push_tokens WHERE user_id = ?', [userId]);
 
   if (tokens.length === 0) {
     // No registered push tokens for user
@@ -82,7 +80,7 @@ export async function sendUserPushNotification(
 
       const resData: any = await response.json().catch(() => ({}));
       if (resData?.failure === 1 && resData?.results?.[0]?.error === 'NotRegistered') {
-        removeDevicePushToken(token);
+        await removeDevicePushToken(token);
         failureCount++;
       } else if (response.ok) {
         sentCount++;

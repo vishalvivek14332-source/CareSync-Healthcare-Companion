@@ -1,5 +1,5 @@
 import { Router, Response } from 'express';
-import { db } from '../db';
+import { queryRow, executeSql } from '../db';
 import { AuthenticatedRequest } from '../auth';
 import { getAuthorizedPatientId } from '../authHelper';
 import { getActiveConnectionCode, createConnectionCodeForPatient, revokeConnectionCode } from '../services/connectionCodeService';
@@ -8,23 +8,24 @@ import { saveProfileAvatar } from '../services/storageService';
 export const patientRouter = Router();
 
 // GET /api/patient/profile
-patientRouter.get('/profile', (req: AuthenticatedRequest, res: Response) => {
+patientRouter.get('/profile', async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const patientId = getAuthorizedPatientId(req, res, req.query.patientId as string);
+    const patientId = await getAuthorizedPatientId(req, res, req.query.patientId as string);
     if (!patientId) return;
 
-    const user = db.prepare(`
-      SELECT id, email, role, name, age, phone, avatar_url as avatarUrl, timezone, primary_caregiver as primaryCaregiver,
-             caregiver_phone as caregiverPhone, emergency_contact as emergencyContact,
-             emergency_phone as emergencyPhone, quiet_hours as quietHours
+    const user = await queryRow(`
+      SELECT id, email, role, name, age, phone, avatar_url as "avatarUrl", timezone, primary_caregiver as "primaryCaregiver",
+             caregiver_phone as "caregiverPhone", emergency_contact as "emergencyContact",
+             emergency_phone as "emergencyPhone", quiet_hours as "quietHours"
       FROM users WHERE id = ?
-    `).get(patientId) as any;
+    `, [patientId]);
 
     if (!user) {
       return res.status(404).json({ error: 'Patient profile not found' });
     }
 
-    const medCount = (db.prepare('SELECT COUNT(*) as count FROM medications WHERE patient_id = ? AND active = 1').get(patientId) as any).count;
+    const countRow = await queryRow<any>('SELECT COUNT(*) as count FROM medications WHERE patient_id = ? AND active = 1', [patientId]);
+    const medCount = parseInt(countRow?.count || '0', 10);
 
     const profile = {
       ...user,
@@ -40,14 +41,14 @@ patientRouter.get('/profile', (req: AuthenticatedRequest, res: Response) => {
 });
 
 // PUT /api/patient/profile
-patientRouter.put('/profile', (req: AuthenticatedRequest, res: Response) => {
+patientRouter.put('/profile', async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const patientId = getAuthorizedPatientId(req, res, req.body.patientId);
+    const patientId = await getAuthorizedPatientId(req, res, req.body.patientId);
     if (!patientId) return;
 
     const { name, age, primaryCaregiver, caregiverPhone, emergencyContact, emergencyPhone, quietHours, timezone } = req.body;
 
-    db.prepare(`
+    await executeSql(`
       UPDATE users
       SET name = COALESCE(?, name),
           age = COALESCE(?, age),
@@ -58,7 +59,7 @@ patientRouter.put('/profile', (req: AuthenticatedRequest, res: Response) => {
           quiet_hours = COALESCE(?, quiet_hours),
           timezone = COALESCE(?, timezone)
       WHERE id = ?
-    `).run(
+    `, [
       name ?? null,
       age ?? null,
       primaryCaregiver ?? null,
@@ -67,15 +68,15 @@ patientRouter.put('/profile', (req: AuthenticatedRequest, res: Response) => {
       emergencyPhone ?? null,
       quietHours ?? null,
       timezone ?? null,
-      patientId
-    );
+      patientId,
+    ]);
 
-    const updated = db.prepare(`
-      SELECT id, email, role, name, age, phone, avatar_url as avatarUrl, timezone, primary_caregiver as primaryCaregiver,
-             caregiver_phone as caregiverPhone, emergency_contact as emergencyContact,
-             emergency_phone as emergencyPhone, quiet_hours as quietHours
+    const updated = await queryRow(`
+      SELECT id, email, role, name, age, phone, avatar_url as "avatarUrl", timezone, primary_caregiver as "primaryCaregiver",
+             caregiver_phone as "caregiverPhone", emergency_contact as "emergencyContact",
+             emergency_phone as "emergencyPhone", quiet_hours as "quietHours"
       FROM users WHERE id = ?
-    `).get(patientId);
+    `, [patientId]);
 
     return res.json(updated);
   } catch (err: any) {
@@ -102,7 +103,7 @@ patientRouter.put('/avatar', async (req: AuthenticatedRequest, res: Response) =>
       finalUrl = uploadResult.url;
     }
 
-    db.prepare('UPDATE users SET avatar_url = ? WHERE id = ?').run(finalUrl, userId);
+    await executeSql('UPDATE users SET avatar_url = ? WHERE id = ?', [finalUrl, userId]);
 
     return res.json({ success: true, avatarUrl: finalUrl });
   } catch (err: any) {
@@ -112,16 +113,16 @@ patientRouter.put('/avatar', async (req: AuthenticatedRequest, res: Response) =>
 });
 
 // GET /api/patient/connection-code
-patientRouter.get('/connection-code', (req: AuthenticatedRequest, res: Response) => {
+patientRouter.get('/connection-code', async (req: AuthenticatedRequest, res: Response) => {
   try {
     if (req.user?.role !== 'patient') {
       return res.status(403).json({ error: 'Only patients can view connection codes' });
     }
 
     const patientId = req.user.userId;
-    let codeInfo = getActiveConnectionCode(patientId);
+    let codeInfo = await getActiveConnectionCode(patientId);
     if (!codeInfo) {
-      codeInfo = createConnectionCodeForPatient(patientId) as any;
+      codeInfo = (await createConnectionCodeForPatient(patientId)) as any;
     }
 
     return res.json(codeInfo);
@@ -132,14 +133,14 @@ patientRouter.get('/connection-code', (req: AuthenticatedRequest, res: Response)
 });
 
 // POST /api/patient/connection-code/generate
-patientRouter.post('/connection-code/generate', (req: AuthenticatedRequest, res: Response) => {
+patientRouter.post('/connection-code/generate', async (req: AuthenticatedRequest, res: Response) => {
   try {
     if (req.user?.role !== 'patient') {
       return res.status(403).json({ error: 'Only patients can generate connection codes' });
     }
 
     const patientId = req.user.userId;
-    const newCodeInfo = createConnectionCodeForPatient(patientId);
+    const newCodeInfo = await createConnectionCodeForPatient(patientId);
     return res.json({ success: true, ...newCodeInfo });
   } catch (err: any) {
     console.error('Error generating connection code:', err);
@@ -148,14 +149,14 @@ patientRouter.post('/connection-code/generate', (req: AuthenticatedRequest, res:
 });
 
 // POST /api/patient/connection-code/revoke
-patientRouter.post('/connection-code/revoke', (req: AuthenticatedRequest, res: Response) => {
+patientRouter.post('/connection-code/revoke', async (req: AuthenticatedRequest, res: Response) => {
   try {
     if (req.user?.role !== 'patient') {
       return res.status(403).json({ error: 'Only patients can revoke connection codes' });
     }
 
     const patientId = req.user.userId;
-    const revoked = revokeConnectionCode(patientId);
+    const revoked = await revokeConnectionCode(patientId);
     return res.json({ success: true, revoked });
   } catch (err: any) {
     console.error('Error revoking connection code:', err);

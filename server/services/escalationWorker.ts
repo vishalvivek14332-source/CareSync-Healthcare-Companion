@@ -1,4 +1,4 @@
-import { db } from '../db';
+import { queryRow, queryRows, executeSql } from '../db';
 import { isQuietHours } from './quietHours';
 import { NotificationService } from './notificationService';
 import { sendUserPushNotification } from './fcmService';
@@ -55,18 +55,18 @@ export async function processMedicationEscalations(options: ProcessOptions = {})
     const currentMins = now.getHours() * 60 + now.getMinutes();
 
     // 1. Fetch active patients and medications
-    const patients = db.prepare('SELECT id, name, quiet_hours, timezone FROM users WHERE role = ?').all('patient') as any[];
+    const patients = await queryRows<any>('SELECT id, name, quiet_hours, timezone FROM users WHERE role = ?', ['patient']);
 
     for (const patient of patients) {
       // Fetch active medications for this patient
-      const medications = db.prepare(`
+      const medications = await queryRows<any>(`
         SELECT id, name, dosage, scheduled_time, timezone
         FROM medications
         WHERE patient_id = ? AND active = 1
-      `).all(patient.id) as any[];
+      `, [patient.id]);
 
       // Fetch patient's escalation rules
-      const rules = db.prepare('SELECT * FROM escalation_rules WHERE patient_id = ?').get(patient.id) as any;
+      const rules = await queryRow<any>('SELECT * FROM escalation_rules WHERE patient_id = ?', [patient.id]);
       const quietStart = rules?.quiet_hours_start || '22:00';
       const quietEnd = rules?.quiet_hours_end || '07:00';
       const inQuietHours = isQuietHours(currentMins, quietStart, quietEnd);
@@ -76,25 +76,25 @@ export async function processMedicationEscalations(options: ProcessOptions = {})
         const minutesOverdue = Math.floor((now.getTime() - scheduledDateTime.getTime()) / (1000 * 60));
 
         // Check if dose has been taken or snoozed
-        const doseLog = db.prepare(`
+        const doseLog = await queryRow<any>(`
           SELECT status, taken_at FROM medication_logs
           WHERE medication_id = ? AND scheduled_date = ?
-        `).get(med.id, todayStr) as any;
+        `, [med.id, todayStr]);
 
         // Fetch or create escalation state in SQLite/PostgreSQL
-        let escState = db.prepare(`
+        let escState = await queryRow<any>(`
           SELECT * FROM medication_escalation_states
           WHERE patient_id = ? AND medication_id = ? AND scheduled_date = ?
-        `).get(patient.id, med.id, todayStr) as any;
+        `, [patient.id, med.id, todayStr]);
 
         // RESOLUTION: If taken, mark resolved and cease escalations
         if (doseLog && doseLog.status === 'taken') {
           if (escState && escState.status !== 'resolved') {
-            db.prepare(`
+            await executeSql(`
               UPDATE medication_escalation_states
               SET status = 'resolved', updated_at = ?
               WHERE id = ?
-            `).run(now.toISOString(), escState.id);
+            `, [now.toISOString(), escState.id]);
             console.log(`[EscalationWorker] Escalation RESOLVED for ${med.name} (${patient.name}) - Dose Confirmed.`);
           }
           continue;
@@ -109,18 +109,18 @@ export async function processMedicationEscalations(options: ProcessOptions = {})
         if (inQuietHours) {
           if (!escState) {
             const escId = `esc-state-${Date.now()}-${med.id}`;
-            db.prepare(`
+            await executeSql(`
               INSERT INTO medication_escalation_states
               (id, patient_id, medication_id, scheduled_date, scheduled_time, current_level, status, created_at, updated_at)
               VALUES (?, ?, ?, ?, ?, 0, 'paused_quiet_hours', ?, ?)
-            `).run(escId, patient.id, med.id, todayStr, med.scheduled_time, now.toISOString(), now.toISOString());
+            `, [escId, patient.id, med.id, todayStr, med.scheduled_time, now.toISOString(), now.toISOString()]);
             console.log(`[EscalationWorker] Escalation initialized as PAUSED during quiet hours for ${patient.name}`);
           } else if (escState.status === 'active') {
-            db.prepare(`
+            await executeSql(`
               UPDATE medication_escalation_states
               SET status = 'paused_quiet_hours', updated_at = ?
               WHERE id = ?
-            `).run(now.toISOString(), escState.id);
+            `, [now.toISOString(), escState.id]);
             console.log(`[EscalationWorker] Escalation PAUSED during quiet hours for ${patient.name}`);
           }
           continue;
@@ -129,29 +129,31 @@ export async function processMedicationEscalations(options: ProcessOptions = {})
         // Create initial escalation state if not exists
         if (!escState) {
           const escId = `esc-state-${Date.now()}-${med.id}`;
-          db.prepare(`
+          await executeSql(`
             INSERT INTO medication_escalation_states
             (id, patient_id, medication_id, scheduled_date, scheduled_time, current_level, status, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, 0, 'active', ?, ?)
-          `).run(escId, patient.id, med.id, todayStr, med.scheduled_time, now.toISOString(), now.toISOString());
+          `, [escId, patient.id, med.id, todayStr, med.scheduled_time, now.toISOString(), now.toISOString()]);
 
-          escState = db.prepare('SELECT * FROM medication_escalation_states WHERE id = ?').get(escId) as any;
+          escState = await queryRow<any>('SELECT * FROM medication_escalation_states WHERE id = ?', [escId]);
         }
 
+        const currentLevel = parseInt(escState.current_level, 10) || 0;
+
         // LEVEL 1: Scheduled Time reached (0-14 mins overdue)
-        if (minutesOverdue >= 0 && minutesOverdue < 15 && escState.current_level < 1) {
+        if (minutesOverdue >= 0 && minutesOverdue < 15 && currentLevel < 1) {
           await triggerEscalationLevel1(patient, med, escState, now);
         }
         // LEVEL 2: 15-44 mins overdue -> Urgent Repeated Notice
-        else if (minutesOverdue >= 15 && minutesOverdue < 45 && escState.current_level < 2) {
+        else if (minutesOverdue >= 15 && minutesOverdue < 45 && currentLevel < 2) {
           await triggerEscalationLevel2(patient, med, escState, now);
         }
         // LEVEL 3: 45-89 mins overdue -> Trusted Caregiver Alert + Push Notification
-        else if (minutesOverdue >= 45 && minutesOverdue < 90 && escState.current_level < 3) {
+        else if (minutesOverdue >= 45 && minutesOverdue < 90 && currentLevel < 3) {
           await triggerEscalationLevel3(patient, med, escState, now);
         }
         // LEVEL 4: 90+ mins overdue -> Critical Emergency Escalation
-        else if (minutesOverdue >= 90 && escState.current_level < 4) {
+        else if (minutesOverdue >= 90 && currentLevel < 4) {
           await triggerEscalationLevel4(patient, med, escState, now);
         }
       }
@@ -164,13 +166,13 @@ export async function processMedicationEscalations(options: ProcessOptions = {})
 }
 
 async function triggerEscalationLevel1(patient: any, med: any, escState: any, now: Date) {
-  db.prepare(`
+  await executeSql(`
     UPDATE medication_escalation_states
     SET current_level = 1, last_escalated_at = ?, status = 'active', updated_at = ?
     WHERE id = ?
-  `).run(now.toISOString(), now.toISOString(), escState.id);
+  `, [now.toISOString(), now.toISOString(), escState.id]);
 
-  NotificationService.notifyPatient(
+  await NotificationService.notifyPatient(
     patient.id,
     `Reminder: ${med.name}`,
     `It's time for your ${med.name} (${med.dosage}). Please confirm when taken.`,
@@ -181,13 +183,13 @@ async function triggerEscalationLevel1(patient: any, med: any, escState: any, no
 }
 
 async function triggerEscalationLevel2(patient: any, med: any, escState: any, now: Date) {
-  db.prepare(`
+  await executeSql(`
     UPDATE medication_escalation_states
     SET current_level = 2, last_escalated_at = ?, status = 'active', updated_at = ?
     WHERE id = ?
-  `).run(now.toISOString(), now.toISOString(), escState.id);
+  `, [now.toISOString(), now.toISOString(), escState.id]);
 
-  NotificationService.notifyPatient(
+  await NotificationService.notifyPatient(
     patient.id,
     `Urgent Reminder: ${med.name}`,
     `Second Notice: Please take your ${med.name} (${med.dosage}) scheduled for ${med.scheduled_time}.`,
@@ -198,13 +200,13 @@ async function triggerEscalationLevel2(patient: any, med: any, escState: any, no
 }
 
 async function triggerEscalationLevel3(patient: any, med: any, escState: any, now: Date) {
-  db.prepare(`
+  await executeSql(`
     UPDATE medication_escalation_states
     SET current_level = 3, last_escalated_at = ?, status = 'active', updated_at = ?
     WHERE id = ?
-  `).run(now.toISOString(), now.toISOString(), escState.id);
+  `, [now.toISOString(), now.toISOString(), escState.id]);
 
-  NotificationService.notifyCaregiver(
+  await NotificationService.notifyCaregiver(
     patient.id,
     `Missed Dose: ${med.name}`,
     `${patient.name} has not confirmed ${med.name} (${med.dosage}) scheduled for ${med.scheduled_time} after multiple reminders.`,
@@ -212,7 +214,7 @@ async function triggerEscalationLevel3(patient: any, med: any, escState: any, no
   );
 
   // Find linked caregiver and send FCM Push Notification
-  const linkedCaregiver = db.prepare('SELECT caregiver_id FROM caregiver_patient_links WHERE patient_id = ? LIMIT 1').get(patient.id) as any;
+  const linkedCaregiver = await queryRow<any>('SELECT caregiver_id FROM caregiver_patient_links WHERE patient_id = ? LIMIT 1', [patient.id]);
   if (linkedCaregiver) {
     sendUserPushNotification(linkedCaregiver.caregiver_id, {
       title: `🚨 Caregiver Alert: ${patient.name}`,
@@ -225,29 +227,29 @@ async function triggerEscalationLevel3(patient: any, med: any, escState: any, no
 }
 
 async function triggerEscalationLevel4(patient: any, med: any, escState: any, now: Date) {
-  db.prepare(`
+  await executeSql(`
     UPDATE medication_escalation_states
     SET current_level = 4, last_escalated_at = ?, status = 'active', updated_at = ?
     WHERE id = ?
-  `).run(now.toISOString(), now.toISOString(), escState.id);
+  `, [now.toISOString(), now.toISOString(), escState.id]);
 
   const alertId = `alt-emerg-${Date.now()}-${med.id}`;
   const timestampStr = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
-  db.prepare(`
+  await executeSql(`
     INSERT INTO alerts (id, patient_id, patient_name, type, severity, title, description, reviewed, action_text, timestamp, created_at)
     VALUES (?, ?, ?, 'emergency_escalation', 'emergency', ?, ?, 0, 'Call Emergency Contact', ?, ?)
-  `).run(
+  `, [
     alertId,
     patient.id,
     patient.name,
     `🚨 Emergency Escalation: ${med.name}`,
     `Critical Alert: Unconfirmed medication ${med.name} for ${patient.name} reached emergency escalation limit.`,
     timestampStr,
-    now.toISOString()
-  );
+    now.toISOString(),
+  ]);
 
-  NotificationService.notifyPatient(
+  await NotificationService.notifyPatient(
     patient.id,
     `🚨 Emergency Escalation: ${med.name}`,
     `Critical Alert: Unconfirmed medication ${med.name} for ${patient.name} reached emergency escalation limit.`,

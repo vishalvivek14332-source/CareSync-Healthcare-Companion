@@ -2,7 +2,7 @@ import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
 import { config } from './config';
-import { db } from './db';
+import { queryRow, executeSql } from './db';
 
 export interface UserPayload {
   userId: string;
@@ -27,7 +27,7 @@ export function generateAccessToken(payload: UserPayload): string {
 // -----------------------------------------------------------------------------
 // REFRESH TOKEN GENERATION & HASHED DATABASE PERSISTENCE (30 days validity)
 // -----------------------------------------------------------------------------
-export function generateRefreshToken(userId: string, deviceInfo?: string): { refreshToken: string; expiresAt: string } {
+export async function generateRefreshToken(userId: string, deviceInfo?: string): Promise<{ refreshToken: string; expiresAt: string }> {
   // 32-byte cryptographically random token
   const refreshToken = crypto.randomBytes(32).toString('hex');
   const tokenHash = crypto.createHash('sha256').update(refreshToken).digest('hex');
@@ -35,10 +35,10 @@ export function generateRefreshToken(userId: string, deviceInfo?: string): { ref
   const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
   const now = new Date().toISOString();
 
-  db.prepare(`
+  await executeSql(`
     INSERT INTO refresh_tokens (id, user_id, token_hash, device_info, expires_at, created_at)
     VALUES (?, ?, ?, ?, ?, ?)
-  `).run(id, userId, tokenHash, deviceInfo || 'CareSync Client', expiresAt, now);
+  `, [id, userId, tokenHash, deviceInfo || 'CareSync Client', expiresAt, now]);
 
   return { refreshToken, expiresAt };
 }
@@ -46,10 +46,10 @@ export function generateRefreshToken(userId: string, deviceInfo?: string): { ref
 // -----------------------------------------------------------------------------
 // REFRESH TOKEN ROTATION (Rotates token and detects replay attacks)
 // -----------------------------------------------------------------------------
-export function rotateRefreshToken(
+export async function rotateRefreshToken(
   providedRefreshToken: string,
   deviceInfo?: string
-): { success: boolean; accessToken?: string; newRefreshToken?: string; user?: UserPayload; error?: string } {
+): Promise<{ success: boolean; accessToken?: string; newRefreshToken?: string; user?: UserPayload; error?: string }> {
   if (!providedRefreshToken || typeof providedRefreshToken !== 'string') {
     return { success: false, error: 'Refresh token is required' };
   }
@@ -57,31 +57,32 @@ export function rotateRefreshToken(
   const tokenHash = crypto.createHash('sha256').update(providedRefreshToken).digest('hex');
 
   // Look up token record in database
-  const record = db.prepare('SELECT * FROM refresh_tokens WHERE token_hash = ?').get(tokenHash) as any;
+  const record = await queryRow<any>('SELECT * FROM refresh_tokens WHERE token_hash = ?', [tokenHash]);
 
   if (!record) {
     return { success: false, error: 'Invalid refresh token' };
   }
 
+  const now = new Date().toISOString();
+
   // REPLAY ATTACK DETECTION: If token was already revoked, revoke all tokens for this user
   if (record.revoked_at) {
     console.warn(`🚨 [Security Warning] Replay of revoked refresh token detected for user ${record.user_id}! Revoking all active sessions.`);
-    db.prepare("UPDATE refresh_tokens SET revoked_at = datetime('now') WHERE user_id = ?").run(record.user_id);
+    await executeSql('UPDATE refresh_tokens SET revoked_at = ? WHERE user_id = ?', [now, record.user_id]);
     return { success: false, error: 'Compromised token detected. Session revoked.' };
   }
 
   // Check expiration
   if (new Date(record.expires_at) < new Date()) {
-    db.prepare("UPDATE refresh_tokens SET revoked_at = datetime('now') WHERE id = ?").run(record.id);
+    await executeSql('UPDATE refresh_tokens SET revoked_at = ? WHERE id = ?', [now, record.id]);
     return { success: false, error: 'Refresh token expired. Please sign in again.' };
   }
 
   // Revoke current refresh token
-  const now = new Date().toISOString();
-  db.prepare('UPDATE refresh_tokens SET revoked_at = ? WHERE id = ?').run(now, record.id);
+  await executeSql('UPDATE refresh_tokens SET revoked_at = ? WHERE id = ?', [now, record.id]);
 
   // Fetch active user profile
-  const user = db.prepare('SELECT id, email, role FROM users WHERE id = ?').get(record.user_id) as any;
+  const user = await queryRow<any>('SELECT id, email, role FROM users WHERE id = ?', [record.user_id]);
   if (!user) {
     return { success: false, error: 'User account not found' };
   }
@@ -94,7 +95,7 @@ export function rotateRefreshToken(
 
   // Issue new Access Token (15m) and new Refresh Token (30d)
   const newAccessToken = generateAccessToken(userPayload);
-  const { refreshToken: newRefreshToken } = generateRefreshToken(user.id, deviceInfo);
+  const { refreshToken: newRefreshToken } = await generateRefreshToken(user.id, deviceInfo);
 
   return {
     success: true,
@@ -107,11 +108,11 @@ export function rotateRefreshToken(
 // -----------------------------------------------------------------------------
 // REVOKE REFRESH TOKEN (Logout)
 // -----------------------------------------------------------------------------
-export function revokeRefreshToken(providedRefreshToken: string): boolean {
+export async function revokeRefreshToken(providedRefreshToken: string): Promise<boolean> {
   if (!providedRefreshToken) return false;
   const tokenHash = crypto.createHash('sha256').update(providedRefreshToken).digest('hex');
   const now = new Date().toISOString();
-  const res = db.prepare('UPDATE refresh_tokens SET revoked_at = ? WHERE token_hash = ?').run(now, tokenHash);
+  const res = await executeSql('UPDATE refresh_tokens SET revoked_at = ? WHERE token_hash = ?', [now, tokenHash]);
   return res.changes > 0;
 }
 

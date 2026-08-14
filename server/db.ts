@@ -674,3 +674,17 @@ function seedDefaultDemoDataIfEmpty() {
     now
   );
 }
+
+export async function closeDb() {
+  try {
+    if (pgPool) {
+      await pgPool.end();
+      console.log('   - PostgreSQL connection pool closed.');
+    } else if (sqliteDb) {
+      sqliteDb.close();
+      console.log('   - SQLite database closed.');
+    }
+  } catch (e) {
+    console.error('Error closing database:', e);
+  }
+}

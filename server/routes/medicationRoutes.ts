@@ -1,5 +1,5 @@
 import { Router, Response } from 'express';
-import { db } from '../db';
+import { queryRow, queryRows, executeSql } from '../db';
 import { AuthenticatedRequest } from '../auth';
 import { getAuthorizedPatientId } from '../authHelper';
 
@@ -34,18 +34,18 @@ export function normalizeScheduledTime(timeStr: string): string | null {
 }
 
 // GET all medications for patient with today's status
-medicationRouter.get('/', (req: AuthenticatedRequest, res: Response) => {
+medicationRouter.get('/', async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const patientId = getAuthorizedPatientId(req, res, req.query.patientId as string);
+    const patientId = await getAuthorizedPatientId(req, res, req.query.patientId as string);
     if (!patientId) return;
 
     const todayStr = new Date().toISOString().split('T')[0];
 
-    const meds = db.prepare(`
-      SELECT m.id, m.name, m.dosage, m.scheduled_time as scheduledTime,
+    const meds = await queryRows<any>(`
+      SELECT m.id, m.name, m.dosage, m.scheduled_time as "scheduledTime",
              m.instructions, m.category, m.color,
              COALESCE(ml.status, 'due') as status,
-             ml.taken_at as takenAt
+             ml.taken_at as "takenAt"
       FROM medications m
       LEFT JOIN medication_logs ml ON m.id = ml.medication_id AND ml.scheduled_date = ?
       WHERE m.patient_id = ? AND m.active = 1
@@ -56,7 +56,7 @@ medicationRouter.get('/', (req: AuthenticatedRequest, res: Response) => {
           WHEN 'evening' THEN 3 
           ELSE 4 
         END
-    `).all(todayStr, patientId);
+    `, [todayStr, patientId]);
 
     return res.json(meds);
   } catch (err: any) {
@@ -66,9 +66,9 @@ medicationRouter.get('/', (req: AuthenticatedRequest, res: Response) => {
 });
 
 // POST new medication schedule (CRUD - Create)
-medicationRouter.post('/', (req: AuthenticatedRequest, res: Response) => {
+medicationRouter.post('/', async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const patientId = getAuthorizedPatientId(req, res, req.body.patientId);
+    const patientId = await getAuthorizedPatientId(req, res, req.body.patientId);
     if (!patientId) return;
 
     const { name, dosage, scheduledTime, instructions, category = 'afternoon', color } = req.body;
@@ -94,16 +94,16 @@ medicationRouter.post('/', (req: AuthenticatedRequest, res: Response) => {
         : 'bg-indigo-50 text-indigo-700 border-indigo-200'
     );
 
-    db.prepare(`
+    await executeSql(`
       INSERT INTO medications (id, patient_id, name, dosage, scheduled_time, instructions, category, color, active, created_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
-    `).run(id, patientId, name.trim(), dosage.trim(), normalizedTime, (instructions || 'Take as prescribed').trim(), category, defaultColor, now);
+    `, [id, patientId, name.trim(), dosage.trim(), normalizedTime, (instructions || 'Take as prescribed').trim(), category, defaultColor, now]);
 
     // Initial log entry for today
-    db.prepare(`
+    await executeSql(`
       INSERT INTO medication_logs (id, medication_id, patient_id, status, scheduled_date, created_at)
       VALUES (?, ?, ?, 'due', ?, ?)
-    `).run(`mlog-${Date.now()}`, id, patientId, todayStr, now);
+    `, [`mlog-${Date.now()}`, id, patientId, todayStr, now]);
 
     const newMed = {
       id,
@@ -125,13 +125,13 @@ medicationRouter.post('/', (req: AuthenticatedRequest, res: Response) => {
 });
 
 // PUT update medication (CRUD - Update)
-medicationRouter.put('/:id', (req: AuthenticatedRequest, res: Response) => {
+medicationRouter.put('/:id', async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { id } = req.params;
-    const med = db.prepare('SELECT patient_id FROM medications WHERE id = ?').get(id) as any;
+    const med = await queryRow<any>('SELECT patient_id FROM medications WHERE id = ?', [id]);
     if (!med) return res.status(404).json({ error: 'Medication not found' });
 
-    const patientId = getAuthorizedPatientId(req, res, med.patient_id);
+    const patientId = await getAuthorizedPatientId(req, res, med.patient_id);
     if (!patientId) return;
 
     const { name, dosage, scheduledTime, instructions, category } = req.body;
@@ -144,7 +144,7 @@ medicationRouter.put('/:id', (req: AuthenticatedRequest, res: Response) => {
       }
     }
 
-    db.prepare(`
+    await executeSql(`
       UPDATE medications
       SET name = COALESCE(?, name),
           dosage = COALESCE(?, dosage),
@@ -152,13 +152,13 @@ medicationRouter.put('/:id', (req: AuthenticatedRequest, res: Response) => {
           instructions = COALESCE(?, instructions),
           category = COALESCE(?, category)
       WHERE id = ?
-    `).run(name ? name.trim() : null, dosage ? dosage.trim() : null, normalizedTime, instructions ? instructions.trim() : null, category ?? null, id);
+    `, [name ? name.trim() : null, dosage ? dosage.trim() : null, normalizedTime, instructions ? instructions.trim() : null, category ?? null, id]);
 
-    const updatedMed = db.prepare(`
-      SELECT m.id, m.name, m.dosage, m.scheduled_time as scheduledTime,
+    const updatedMed = await queryRow(`
+      SELECT m.id, m.name, m.dosage, m.scheduled_time as "scheduledTime",
              m.instructions, m.category, m.color, m.active
       FROM medications m WHERE m.id = ?
-    `).get(id);
+    `, [id]);
 
     return res.json({ message: 'Medication updated successfully', medication: updatedMed });
   } catch (err: any) {
@@ -167,19 +167,19 @@ medicationRouter.put('/:id', (req: AuthenticatedRequest, res: Response) => {
 });
 
 // DELETE medication (CRUD - Delete / Deactivate)
-medicationRouter.delete('/:id', (req: AuthenticatedRequest, res: Response) => {
+medicationRouter.delete('/:id', async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { id } = req.params;
-    const med = db.prepare('SELECT patient_id FROM medications WHERE id = ?').get(id) as any;
+    const med = await queryRow<any>('SELECT patient_id FROM medications WHERE id = ?', [id]);
     if (!med) return res.status(404).json({ error: 'Medication not found' });
 
-    const patientId = getAuthorizedPatientId(req, res, med.patient_id);
+    const patientId = await getAuthorizedPatientId(req, res, med.patient_id);
     if (!patientId) return;
 
-    db.prepare('UPDATE medications SET active = 0 WHERE id = ?').run(id);
+    await executeSql('UPDATE medications SET active = 0 WHERE id = ?', [id]);
 
     // Cancel any active escalation states for this medication
-    db.prepare("UPDATE medication_escalation_states SET status = 'resolved' WHERE medication_id = ? AND status = 'active'").run(id);
+    await executeSql("UPDATE medication_escalation_states SET status = 'resolved' WHERE medication_id = ? AND status = 'active'", [id]);
 
     return res.json({ message: 'Medication removed successfully' });
   } catch (err: any) {
@@ -188,39 +188,39 @@ medicationRouter.delete('/:id', (req: AuthenticatedRequest, res: Response) => {
 });
 
 // POST log dose (take / snooze)
-medicationRouter.post('/:id/log', (req: AuthenticatedRequest, res: Response) => {
+medicationRouter.post('/:id/log', async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { id } = req.params;
-    const med = db.prepare('SELECT patient_id FROM medications WHERE id = ?').get(id) as any;
-    const patientId = getAuthorizedPatientId(req, res, med?.patient_id);
+    const med = await queryRow<any>('SELECT patient_id FROM medications WHERE id = ?', [id]);
+    const patientId = await getAuthorizedPatientId(req, res, med?.patient_id);
     if (!patientId) return;
 
     const { status = 'taken', takenAt } = req.body;
     const todayStr = new Date().toISOString().split('T')[0];
     const nowStr = takenAt || new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
-    const existingLog = db.prepare('SELECT id FROM medication_logs WHERE medication_id = ? AND scheduled_date = ?').get(id, todayStr) as any;
+    const existingLog = await queryRow<any>('SELECT id FROM medication_logs WHERE medication_id = ? AND scheduled_date = ?', [id, todayStr]);
 
     if (existingLog) {
-      db.prepare(`
+      await executeSql(`
         UPDATE medication_logs
         SET status = ?, taken_at = ?
         WHERE id = ?
-      `).run(status, status === 'taken' ? nowStr : null, existingLog.id);
+      `, [status, status === 'taken' ? nowStr : null, existingLog.id]);
     } else {
-      db.prepare(`
+      await executeSql(`
         INSERT INTO medication_logs (id, medication_id, patient_id, status, scheduled_date, taken_at, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?)
-      `).run(`mlog-${Date.now()}`, id, patientId, status, todayStr, status === 'taken' ? nowStr : null, new Date().toISOString());
+      `, [`mlog-${Date.now()}`, id, patientId, status, todayStr, status === 'taken' ? nowStr : null, new Date().toISOString()]);
     }
 
     // Immediately resolve active escalation state if taken
     if (status === 'taken') {
-      db.prepare(`
+      await executeSql(`
         UPDATE medication_escalation_states
         SET status = 'resolved', updated_at = ?
         WHERE patient_id = ? AND medication_id = ? AND scheduled_date = ?
-      `).run(new Date().toISOString(), patientId, id, todayStr);
+      `, [new Date().toISOString(), patientId, id, todayStr]);
     }
 
     return res.json({ success: true, medicationId: id, status, takenAt: status === 'taken' ? nowStr : undefined });

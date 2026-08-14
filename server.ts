@@ -7,7 +7,7 @@ import { v4 as uuidv4 } from "uuid";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI } from "@google/genai";
 import { config } from "./server/config";
-import { initDb, db, checkDatabaseHealth, pgPool } from "./server/db";
+import { initDb, checkDatabaseHealth, pgPool, queryRow, closeDb } from "./server/db";
 import { authenticateToken, AuthenticatedRequest } from "./server/auth";
 import { authRouter } from "./server/routes/authRoutes";
 import { patientRouter } from "./server/routes/patientRoutes";
@@ -166,7 +166,7 @@ async function startServer() {
       }
 
       const patientId = req.user?.userId || "p-1";
-      const patient = db.prepare("SELECT name FROM users WHERE id = ?").get(patientId) as any;
+      const patient = await queryRow<any>("SELECT name FROM users WHERE id = ?", [patientId]);
       const patientName = patient?.name || context?.patientName || "Alex Johnson";
 
       if (ai) {
@@ -242,14 +242,7 @@ Your job is to help users manage daily health routines, including medications, h
     console.log("\n🛑 [Server] Received shutdown signal. Closing resources gracefully...");
     stopEscalationWorker();
     serverInstance.close(async () => {
-      try {
-        if (pgPool) {
-          await pgPool.end();
-          console.log("   - PostgreSQL connection pool closed.");
-        }
-        db.close();
-        console.log("   - SQLite instance closed.");
-      } catch (e) {}
+      await closeDb();
       console.log("✅ CareSync server shut down cleanly.");
       process.exit(0);
     });

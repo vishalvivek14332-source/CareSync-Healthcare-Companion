@@ -1,26 +1,26 @@
 import { Router, Response } from 'express';
-import { db } from '../db';
+import { queryRow, executeSql } from '../db';
 import { AuthenticatedRequest } from '../auth';
 import { getAuthorizedPatientId } from '../authHelper';
 
 export const escalationRouter = Router();
 
-escalationRouter.get('/', (req: AuthenticatedRequest, res: Response) => {
+escalationRouter.get('/', async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const patientId = getAuthorizedPatientId(req, res, req.query.patientId as string);
+    const patientId = await getAuthorizedPatientId(req, res, req.query.patientId as string);
     if (!patientId) return;
 
-    const rules = db.prepare(`
-      SELECT caregiver_name as caregiverName, caregiver_phone as caregiverPhone,
-             caregiver_email as caregiverEmail, emergency_contact_name as emergencyContactName,
-             emergency_contact_phone as emergencyContactPhone, emergency_contact_relation as emergencyContactRelation,
-             quiet_hours_start as quietHoursStart, quiet_hours_end as quietHoursEnd,
-             max_reminders_before_escalation as maxRemindersBeforeEscalation,
-             repeat_reminder_interval_minutes as repeatReminderIntervalMinutes,
+    const rules = await queryRow<any>(`
+      SELECT caregiver_name as "caregiverName", caregiver_phone as "caregiverPhone",
+             caregiver_email as "caregiverEmail", emergency_contact_name as "emergencyContactName",
+             emergency_contact_phone as "emergencyContactPhone", emergency_contact_relation as "emergencyContactRelation",
+             quiet_hours_start as "quietHoursStart", quiet_hours_end as "quietHoursEnd",
+             max_reminders_before_escalation as "maxRemindersBeforeEscalation",
+             repeat_reminder_interval_minutes as "repeatReminderIntervalMinutes",
              levels_json
       FROM escalation_rules
       WHERE patient_id = ?
-    `).get(patientId) as any;
+    `, [patientId]);
 
     if (!rules) {
       const defaultLevels = [
@@ -44,7 +44,7 @@ escalationRouter.get('/', (req: AuthenticatedRequest, res: Response) => {
       });
     }
 
-    const levels = JSON.parse(rules.levels_json || '[]');
+    const levels = typeof rules.levels_json === 'string' ? JSON.parse(rules.levels_json || '[]') : (rules.levels_json || []);
     delete rules.levels_json;
 
     return res.json({ ...rules, levels });
@@ -53,9 +53,9 @@ escalationRouter.get('/', (req: AuthenticatedRequest, res: Response) => {
   }
 });
 
-escalationRouter.put('/', (req: AuthenticatedRequest, res: Response) => {
+escalationRouter.put('/', async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const patientId = getAuthorizedPatientId(req, res, req.body.patientId);
+    const patientId = await getAuthorizedPatientId(req, res, req.body.patientId);
     if (!patientId) return;
 
     const {
@@ -73,10 +73,10 @@ escalationRouter.put('/', (req: AuthenticatedRequest, res: Response) => {
     } = req.body;
 
     const now = new Date().toISOString();
-    const existing = db.prepare('SELECT id FROM escalation_rules WHERE patient_id = ?').get(patientId) as any;
+    const existing = await queryRow<any>('SELECT id FROM escalation_rules WHERE patient_id = ?', [patientId]);
 
     if (existing) {
-      db.prepare(`
+      await executeSql(`
         UPDATE escalation_rules
         SET caregiver_name = COALESCE(?, caregiver_name),
             caregiver_phone = COALESCE(?, caregiver_phone),
@@ -91,27 +91,27 @@ escalationRouter.put('/', (req: AuthenticatedRequest, res: Response) => {
             levels_json = CASE WHEN ? IS NOT NULL THEN ? ELSE levels_json END,
             updated_at = ?
         WHERE patient_id = ?
-      `).run(
-        caregiverName,
-        caregiverPhone,
-        caregiverEmail,
-        emergencyContactName,
-        emergencyContactPhone,
-        emergencyContactRelation,
-        quietHoursStart,
-        quietHoursEnd,
-        maxRemindersBeforeEscalation,
-        repeatReminderIntervalMinutes,
-        levels ? true : null,
+      `, [
+        caregiverName ?? null,
+        caregiverPhone ?? null,
+        caregiverEmail ?? null,
+        emergencyContactName ?? null,
+        emergencyContactPhone ?? null,
+        emergencyContactRelation ?? null,
+        quietHoursStart ?? null,
+        quietHoursEnd ?? null,
+        maxRemindersBeforeEscalation ?? null,
+        repeatReminderIntervalMinutes ?? null,
+        levels ? 'true' : null,
         levels ? JSON.stringify(levels) : null,
         now,
-        patientId
-      );
+        patientId,
+      ]);
     } else {
-      db.prepare(`
+      await executeSql(`
         INSERT INTO escalation_rules (id, patient_id, caregiver_name, caregiver_phone, caregiver_email, emergency_contact_name, emergency_contact_phone, emergency_contact_relation, quiet_hours_start, quiet_hours_end, max_reminders_before_escalation, repeat_reminder_interval_minutes, levels_json, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(
+      `, [
         `esc-${Date.now()}`,
         patientId,
         caregiverName,
@@ -125,8 +125,8 @@ escalationRouter.put('/', (req: AuthenticatedRequest, res: Response) => {
         maxRemindersBeforeEscalation || 3,
         repeatReminderIntervalMinutes || 15,
         JSON.stringify(levels || []),
-        now
-      );
+        now,
+      ]);
     }
 
     return res.json({ success: true, message: 'Escalation rules updated' });

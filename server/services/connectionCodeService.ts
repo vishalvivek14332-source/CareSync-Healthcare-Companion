@@ -1,5 +1,5 @@
 import crypto from 'crypto';
-import { db } from '../db';
+import { queryRow, executeSql } from '../db';
 
 /**
  * Generate a cryptographically random, uppercase connection code
@@ -23,27 +23,27 @@ export function hashCode(code: string): string {
  * Generate a new connection code for a patient.
  * Automatically revokes any previous active codes for this patient.
  */
-export function createConnectionCodeForPatient(patientId: string, expiresInDays = 7): { code: string; expiresAt: string } {
+export async function createConnectionCodeForPatient(patientId: string, expiresInDays = 7): Promise<{ code: string; expiresAt: string }> {
   const now = new Date();
   const expiresAtDate = new Date(now.getTime() + expiresInDays * 24 * 60 * 60 * 1000);
   const nowIso = now.toISOString();
   const expiresAtIso = expiresAtDate.toISOString();
 
   // Revoke previous active codes for this patient
-  db.prepare(`
+  await executeSql(`
     UPDATE care_connection_codes
     SET revoked_at = ?
     WHERE patient_id = ? AND revoked_at IS NULL
-  `).run(nowIso, patientId);
+  `, [nowIso, patientId]);
 
   const rawCode = generateRandomCodeString();
   const codeHash = hashCode(rawCode);
   const codeId = `code-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`;
 
-  db.prepare(`
+  await executeSql(`
     INSERT INTO care_connection_codes (id, patient_id, code_hash, code_display, expires_at, created_at)
     VALUES (?, ?, ?, ?, ?, ?)
-  `).run(codeId, patientId, codeHash, rawCode, expiresAtIso, nowIso);
+  `, [codeId, patientId, codeHash, rawCode, expiresAtIso, nowIso]);
 
   return {
     code: rawCode,
@@ -54,15 +54,15 @@ export function createConnectionCodeForPatient(patientId: string, expiresInDays 
 /**
  * Fetch the current active connection code for a patient.
  */
-export function getActiveConnectionCode(patientId: string): { code: string; expiresAt: string; createdAt: string } | null {
+export async function getActiveConnectionCode(patientId: string): Promise<{ code: string; expiresAt: string; createdAt: string } | null> {
   const nowIso = new Date().toISOString();
-  const row = db.prepare(`
+  const row = await queryRow<any>(`
     SELECT code_display as code, expires_at as expiresAt, created_at as createdAt
     FROM care_connection_codes
     WHERE patient_id = ? AND revoked_at IS NULL AND expires_at > ?
     ORDER BY created_at DESC
     LIMIT 1
-  `).get(patientId, nowIso) as any;
+  `, [patientId, nowIso]);
 
   return row || null;
 }
@@ -70,13 +70,13 @@ export function getActiveConnectionCode(patientId: string): { code: string; expi
 /**
  * Revoke the current connection code for a patient.
  */
-export function revokeConnectionCode(patientId: string): boolean {
+export async function revokeConnectionCode(patientId: string): Promise<boolean> {
   const nowIso = new Date().toISOString();
-  const res = db.prepare(`
+  const res = await executeSql(`
     UPDATE care_connection_codes
     SET revoked_at = ?
     WHERE patient_id = ? AND revoked_at IS NULL
-  `).run(nowIso, patientId);
+  `, [nowIso, patientId]);
 
   return res.changes > 0;
 }
@@ -84,7 +84,7 @@ export function revokeConnectionCode(patientId: string): boolean {
 /**
  * Validate a connection code and link the caregiver to the patient.
  */
-export function redeemConnectionCode(caregiverId: string, inputCode: string): { success: boolean; patient?: any; error?: string } {
+export async function redeemConnectionCode(caregiverId: string, inputCode: string): Promise<{ success: boolean; patient?: any; error?: string }> {
   if (!inputCode || typeof inputCode !== 'string') {
     return { success: false, error: 'Connection code is required' };
   }
@@ -94,14 +94,14 @@ export function redeemConnectionCode(caregiverId: string, inputCode: string): { 
   const nowIso = new Date().toISOString();
 
   // Find valid active code
-  const codeRecord = db.prepare(`
+  const codeRecord = await queryRow<any>(`
     SELECT c.*, u.id as patientId, u.name as patientName, u.email as patientEmail, u.phone as patientPhone
     FROM care_connection_codes c
     JOIN users u ON c.patient_id = u.id
     WHERE (c.code_hash = ? OR c.code_display = ?)
       AND c.revoked_at IS NULL
       AND c.expires_at > ?
-  `).get(codeHash, cleanCode, nowIso) as any;
+  `, [codeHash, cleanCode, nowIso]);
 
   if (!codeRecord) {
     return { success: false, error: 'Invalid, expired, or revoked connection code' };
@@ -110,32 +110,32 @@ export function redeemConnectionCode(caregiverId: string, inputCode: string): { 
   const patientId = codeRecord.patient_id;
 
   // Check if link already exists
-  const existingLink = db.prepare(`
+  const existingLink = await queryRow<any>(`
     SELECT id FROM caregiver_patient_links
     WHERE caregiver_id = ? AND patient_id = ?
-  `).get(caregiverId, patientId);
+  `, [caregiverId, patientId]);
 
   if (!existingLink) {
     const linkId = `link-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`;
-    db.prepare(`
+    await executeSql(`
       INSERT INTO caregiver_patient_links (id, caregiver_id, patient_id, link_code, created_at)
       VALUES (?, ?, ?, ?, ?)
-    `).run(linkId, caregiverId, patientId, cleanCode, nowIso);
+    `, [linkId, caregiverId, patientId, cleanCode, nowIso]);
   }
 
   // Mark code as used
-  db.prepare(`
+  await executeSql(`
     UPDATE care_connection_codes
     SET used_at = ?
     WHERE id = ?
-  `).run(nowIso, codeRecord.id);
+  `, [nowIso, codeRecord.id]);
 
-  const patient = db.prepare(`
+  const patient = await queryRow<any>(`
     SELECT id, name, age, email, phone, avatar_url as avatarUrl, primary_caregiver as primaryCaregiver,
            caregiver_phone as caregiverPhone, emergency_contact as emergencyContact,
            emergency_phone as emergencyPhone, quiet_hours as quietHours
     FROM users WHERE id = ?
-  `).get(patientId);
+  `, [patientId]);
 
   return {
     success: true,

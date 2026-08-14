@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import bcrypt from 'bcryptjs';
-import { db } from '../db';
+import { queryRow, queryRows, executeSql } from '../db';
 import {
   generateAccessToken,
   generateRefreshToken,
@@ -44,7 +44,7 @@ authRouter.post('/signup', async (req: Request, res: Response) => {
     }
 
     const emailNorm = email.toLowerCase().trim();
-    const existing = db.prepare('SELECT id FROM users WHERE email = ?').get(emailNorm);
+    const existing = await queryRow('SELECT id FROM users WHERE email = ?', [emailNorm]);
     if (existing) {
       return res.status(409).json({ error: 'An account with this email address already exists' });
     }
@@ -53,10 +53,10 @@ authRouter.post('/signup', async (req: Request, res: Response) => {
     const userId = `${role === 'patient' ? 'p' : 'c'}-${Date.now()}`;
     const now = new Date().toISOString();
 
-    db.prepare(`
+    await executeSql(`
       INSERT INTO users (id, email, password_hash, role, name, age, phone, timezone, primary_caregiver, caregiver_phone, emergency_contact, emergency_phone, quiet_hours, created_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
+    `, [
       userId,
       emailNorm,
       passwordHash,
@@ -70,25 +70,25 @@ authRouter.post('/signup', async (req: Request, res: Response) => {
       emergencyContact || null,
       emergencyPhone || null,
       quietHours || '10:00 PM - 7:00 AM',
-      now
-    );
+      now,
+    ]);
 
     // If registered as patient, automatically generate a unique CARE-XXXXXX connection code
     let connectionCode: any = null;
     if (role === 'patient') {
-      connectionCode = createConnectionCodeForPatient(userId);
+      connectionCode = await createConnectionCodeForPatient(userId);
     }
 
     const userPayload = { userId, email: emailNorm, role };
     const accessToken = generateAccessToken(userPayload);
-    const { refreshToken } = generateRefreshToken(userId, req.headers['user-agent']);
+    const { refreshToken } = await generateRefreshToken(userId, req.headers['user-agent']);
 
-    const userRecord = db.prepare(`
-      SELECT id, email, role, name, age, phone, avatar_url as avatarUrl, timezone, primary_caregiver as primaryCaregiver,
-             caregiver_phone as caregiverPhone, emergency_contact as emergencyContact,
-             emergency_phone as emergencyPhone, quiet_hours as quietHours
+    const userRecord = await queryRow(`
+      SELECT id, email, role, name, age, phone, avatar_url as "avatarUrl", timezone, primary_caregiver as "primaryCaregiver",
+             caregiver_phone as "caregiverPhone", emergency_contact as "emergencyContact",
+             emergency_phone as "emergencyPhone", quiet_hours as "quietHours"
       FROM users WHERE id = ?
-    `).get(userId) as any;
+    `, [userId]);
 
     return res.status(201).json({
       token: accessToken,
@@ -112,7 +112,7 @@ authRouter.post('/login', async (req: Request, res: Response) => {
     }
 
     const emailNorm = email.toLowerCase().trim();
-    const user = db.prepare('SELECT * FROM users WHERE email = ?').get(emailNorm) as any;
+    const user = await queryRow<any>('SELECT * FROM users WHERE email = ?', [emailNorm]);
 
     if (!user) {
       return res.status(401).json({ error: 'Invalid email or password' });
@@ -125,15 +125,15 @@ authRouter.post('/login', async (req: Request, res: Response) => {
 
     let connectionCode: any = null;
     if (user.role === 'patient') {
-      connectionCode = getActiveConnectionCode(user.id);
+      connectionCode = await getActiveConnectionCode(user.id);
       if (!connectionCode) {
-        connectionCode = createConnectionCodeForPatient(user.id);
+        connectionCode = await createConnectionCodeForPatient(user.id);
       }
     }
 
     const userPayload = { userId: user.id, email: user.email, role: user.role };
     const accessToken = generateAccessToken(userPayload);
-    const { refreshToken } = generateRefreshToken(user.id, req.headers['user-agent']);
+    const { refreshToken } = await generateRefreshToken(user.id, req.headers['user-agent']);
 
     const userProfile = {
       id: user.id,
@@ -164,14 +164,14 @@ authRouter.post('/login', async (req: Request, res: Response) => {
 });
 
 // POST /api/auth/refresh - Rotate refresh token & issue new access token
-authRouter.post('/refresh', (req: Request, res: Response) => {
+authRouter.post('/refresh', async (req: Request, res: Response) => {
   try {
     const { refreshToken } = req.body;
     if (!refreshToken) {
       return res.status(400).json({ error: 'Refresh token is required' });
     }
 
-    const result = rotateRefreshToken(refreshToken, req.headers['user-agent']);
+    const result = await rotateRefreshToken(refreshToken, req.headers['user-agent']);
     if (!result.success) {
       return res.status(401).json({ error: result.error || 'Invalid refresh token' });
     }
@@ -188,11 +188,11 @@ authRouter.post('/refresh', (req: Request, res: Response) => {
 });
 
 // POST /api/auth/logout - Revoke active refresh token
-authRouter.post('/logout', (req: Request, res: Response) => {
+authRouter.post('/logout', async (req: Request, res: Response) => {
   try {
     const { refreshToken } = req.body;
     if (refreshToken) {
-      revokeRefreshToken(refreshToken);
+      await revokeRefreshToken(refreshToken);
     }
     return res.json({ success: true, message: 'Logged out successfully' });
   } catch (err: any) {
@@ -201,14 +201,14 @@ authRouter.post('/logout', (req: Request, res: Response) => {
 });
 
 // GET /api/auth/me - Fetch authenticated user profile
-authRouter.get('/me', authenticateToken, (req: AuthenticatedRequest, res: Response) => {
+authRouter.get('/me', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const user = db.prepare(`
-      SELECT id, email, role, name, age, phone, avatar_url as avatarUrl, timezone, primary_caregiver as primaryCaregiver,
-             caregiver_phone as caregiverPhone, emergency_contact as emergencyContact,
-             emergency_phone as emergencyPhone, quiet_hours as quietHours
+    const user = await queryRow(`
+      SELECT id, email, role, name, age, phone, avatar_url as "avatarUrl", timezone, primary_caregiver as "primaryCaregiver",
+             caregiver_phone as "caregiverPhone", emergency_contact as "emergencyContact",
+             emergency_phone as "emergencyPhone", quiet_hours as "quietHours"
       FROM users WHERE id = ?
-    `).get(req.user!.userId) as any;
+    `, [req.user!.userId]);
 
     if (!user) {
       return res.status(404).json({ error: 'User profile not found' });
@@ -216,9 +216,9 @@ authRouter.get('/me', authenticateToken, (req: AuthenticatedRequest, res: Respon
 
     let connectionCode: any = null;
     if (user.role === 'patient') {
-      connectionCode = getActiveConnectionCode(user.id);
+      connectionCode = await getActiveConnectionCode(user.id);
       if (!connectionCode) {
-        connectionCode = createConnectionCodeForPatient(user.id);
+        connectionCode = await createConnectionCodeForPatient(user.id);
       }
     }
 
@@ -232,11 +232,11 @@ authRouter.get('/me', authenticateToken, (req: AuthenticatedRequest, res: Respon
 });
 
 // POST /api/auth/switch-demo - Switch between demo accounts for evaluation
-authRouter.post('/switch-demo', (req: Request, res: Response) => {
+authRouter.post('/switch-demo', async (req: Request, res: Response) => {
   try {
     const { role } = req.body;
     const targetId = role === 'caregiver' ? 'c-1' : 'p-1';
-    const user = db.prepare('SELECT * FROM users WHERE id = ?').get(targetId) as any;
+    const user = await queryRow<any>('SELECT * FROM users WHERE id = ?', [targetId]);
 
     if (!user) {
       return res.status(404).json({ error: 'Demo user not seeded' });
@@ -244,7 +244,7 @@ authRouter.post('/switch-demo', (req: Request, res: Response) => {
 
     const userPayload = { userId: user.id, email: user.email, role: user.role };
     const accessToken = generateAccessToken(userPayload);
-    const { refreshToken } = generateRefreshToken(user.id, 'Demo Switcher');
+    const { refreshToken } = await generateRefreshToken(user.id, 'Demo Switcher');
 
     const userProfile = {
       id: user.id,

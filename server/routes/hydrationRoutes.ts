@@ -1,23 +1,23 @@
 import { Router, Response } from 'express';
-import { db } from '../db';
+import { queryRow, queryRows, executeSql } from '../db';
 import { AuthenticatedRequest } from '../auth';
 import { getAuthorizedPatientId } from '../authHelper';
 
 export const hydrationRouter = Router();
 
 // GET /api/hydration - Get current hydration state & logs for patient
-hydrationRouter.get('/', (req: AuthenticatedRequest, res: Response) => {
+hydrationRouter.get('/', async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const patientId = getAuthorizedPatientId(req, res, req.query.patientId as string);
+    const patientId = await getAuthorizedPatientId(req, res, req.query.patientId as string);
     if (!patientId) return;
 
     // 1. Fetch patient's hydration settings
-    const settings = db.prepare(`
-      SELECT daily_goal_liters as dailyGoalLiters, reminder_enabled as reminderEnabled,
-             start_time as startTime, end_time as endTime, interval_minutes as intervalMinutes
+    const settings = await queryRow<any>(`
+      SELECT daily_goal_liters as "dailyGoalLiters", reminder_enabled as "reminderEnabled",
+             start_time as "startTime", end_time as "endTime", interval_minutes as "intervalMinutes"
       FROM hydration_settings
       WHERE patient_id = ?
-    `).get(patientId) as any || {
+    `, [patientId]) || {
       dailyGoalLiters: 2.0,
       reminderEnabled: 1,
       startTime: '08:00',
@@ -25,15 +25,18 @@ hydrationRouter.get('/', (req: AuthenticatedRequest, res: Response) => {
       intervalMinutes: 60,
     };
 
-    // 2. Fetch today's real logs
-    const logs = db.prepare(`
-      SELECT id, amount_ml as amountMl, timestamp, logged_at as loggedAt
-      FROM hydration_logs
-      WHERE patient_id = ? AND date(logged_at) = date('now')
-      ORDER BY logged_at DESC
-    `).all(patientId) as any[];
+    // 2. Fetch today's real logs (since start of current day)
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
 
-    const totalMl = logs.reduce((sum, log) => sum + log.amountMl, 0);
+    const logs = await queryRows<any>(`
+      SELECT id, amount_ml as "amountMl", timestamp, logged_at as "loggedAt"
+      FROM hydration_logs
+      WHERE patient_id = ? AND logged_at >= ?
+      ORDER BY logged_at DESC
+    `, [patientId, todayStart.toISOString()]);
+
+    const totalMl = logs.reduce((sum, log) => sum + (parseInt(log.amountMl, 10) || 0), 0);
     const currentLiters = Number((totalMl / 1000).toFixed(2));
 
     // 3. Compute real hourly intervals based on actual logs
@@ -48,7 +51,7 @@ hydrationRouter.get('/', (req: AuthenticatedRequest, res: Response) => {
           const d = new Date(l.loggedAt);
           return d.getHours() <= target24;
         })
-        .reduce((sum, l) => sum + l.amountMl, 0);
+        .reduce((sum, l) => sum + (parseInt(l.amountMl, 10) || 0), 0);
 
       return {
         hour,
@@ -58,13 +61,13 @@ hydrationRouter.get('/', (req: AuthenticatedRequest, res: Response) => {
 
     return res.json({
       currentLiters,
-      goalLiters: settings.dailyGoalLiters,
+      goalLiters: parseFloat(settings.dailyGoalLiters) || 2.0,
       settings: {
-        dailyGoalLiters: settings.dailyGoalLiters,
+        dailyGoalLiters: parseFloat(settings.dailyGoalLiters) || 2.0,
         reminderEnabled: Boolean(settings.reminderEnabled),
         startTime: settings.startTime,
         endTime: settings.endTime,
-        intervalMinutes: settings.intervalMinutes,
+        intervalMinutes: parseInt(settings.intervalMinutes, 10) || 60,
       },
       nextReminderTime: settings.reminderEnabled ? `Every ${settings.intervalMinutes} mins (${settings.startTime} - ${settings.endTime})` : 'Reminders Disabled',
       logs,
@@ -77,17 +80,17 @@ hydrationRouter.get('/', (req: AuthenticatedRequest, res: Response) => {
 });
 
 // GET /api/hydration/settings
-hydrationRouter.get('/settings', (req: AuthenticatedRequest, res: Response) => {
+hydrationRouter.get('/settings', async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const patientId = getAuthorizedPatientId(req, res, req.query.patientId as string);
+    const patientId = await getAuthorizedPatientId(req, res, req.query.patientId as string);
     if (!patientId) return;
 
-    const settings = db.prepare(`
-      SELECT daily_goal_liters as dailyGoalLiters, reminder_enabled as reminderEnabled,
-             start_time as startTime, end_time as endTime, interval_minutes as intervalMinutes
+    const settings = await queryRow<any>(`
+      SELECT daily_goal_liters as "dailyGoalLiters", reminder_enabled as "reminderEnabled",
+             start_time as "startTime", end_time as "endTime", interval_minutes as "intervalMinutes"
       FROM hydration_settings
       WHERE patient_id = ?
-    `).get(patientId) as any;
+    `, [patientId]);
 
     if (!settings) {
       return res.json({
@@ -100,11 +103,11 @@ hydrationRouter.get('/settings', (req: AuthenticatedRequest, res: Response) => {
     }
 
     return res.json({
-      dailyGoalLiters: settings.dailyGoalLiters,
+      dailyGoalLiters: parseFloat(settings.dailyGoalLiters) || 2.0,
       reminderEnabled: Boolean(settings.reminderEnabled),
       startTime: settings.startTime,
       endTime: settings.endTime,
-      intervalMinutes: settings.intervalMinutes,
+      intervalMinutes: parseInt(settings.intervalMinutes, 10) || 60,
     });
   } catch (err: any) {
     return res.status(500).json({ error: 'Failed to fetch hydration settings' });
@@ -112,9 +115,9 @@ hydrationRouter.get('/settings', (req: AuthenticatedRequest, res: Response) => {
 });
 
 // PUT /api/hydration/settings - Update hydration schedule & goals
-hydrationRouter.put('/settings', (req: AuthenticatedRequest, res: Response) => {
+hydrationRouter.put('/settings', async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const patientId = getAuthorizedPatientId(req, res, req.body.patientId);
+    const patientId = await getAuthorizedPatientId(req, res, req.body.patientId);
     if (!patientId) return;
 
     const { dailyGoalLiters, reminderEnabled, startTime, endTime, intervalMinutes } = req.body;
@@ -138,10 +141,10 @@ hydrationRouter.put('/settings', (req: AuthenticatedRequest, res: Response) => {
     const now = new Date().toISOString();
     const id = `hyd-set-${Date.now()}`;
 
-    const existing = db.prepare('SELECT id FROM hydration_settings WHERE patient_id = ?').get(patientId) as any;
+    const existing = await queryRow<any>('SELECT id FROM hydration_settings WHERE patient_id = ?', [patientId]);
 
     if (existing) {
-      db.prepare(`
+      await executeSql(`
         UPDATE hydration_settings
         SET daily_goal_liters = COALESCE(?, daily_goal_liters),
             reminder_enabled = COALESCE(?, reminder_enabled),
@@ -150,20 +153,20 @@ hydrationRouter.put('/settings', (req: AuthenticatedRequest, res: Response) => {
             interval_minutes = COALESCE(?, interval_minutes),
             updated_at = ?
         WHERE patient_id = ?
-      `).run(
+      `, [
         dailyGoalLiters ?? null,
         reminderEnabled !== undefined ? (reminderEnabled ? 1 : 0) : null,
         startTime ?? null,
         endTime ?? null,
         intervalMinutes ?? null,
         now,
-        patientId
-      );
+        patientId,
+      ]);
     } else {
-      db.prepare(`
+      await executeSql(`
         INSERT INTO hydration_settings (id, patient_id, daily_goal_liters, reminder_enabled, start_time, end_time, interval_minutes, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(
+      `, [
         id,
         patientId,
         dailyGoalLiters || 2.0,
@@ -171,25 +174,25 @@ hydrationRouter.put('/settings', (req: AuthenticatedRequest, res: Response) => {
         startTime || '08:00',
         endTime || '20:00',
         intervalMinutes || 60,
-        now
-      );
+        now,
+      ]);
     }
 
-    const updated = db.prepare(`
-      SELECT daily_goal_liters as dailyGoalLiters, reminder_enabled as reminderEnabled,
-             start_time as startTime, end_time as endTime, interval_minutes as intervalMinutes
+    const updated = await queryRow<any>(`
+      SELECT daily_goal_liters as "dailyGoalLiters", reminder_enabled as "reminderEnabled",
+             start_time as "startTime", end_time as "endTime", interval_minutes as "intervalMinutes"
       FROM hydration_settings
       WHERE patient_id = ?
-    `).get(patientId) as any;
+    `, [patientId]);
 
     return res.json({
       success: true,
       settings: {
-        dailyGoalLiters: updated.dailyGoalLiters,
+        dailyGoalLiters: parseFloat(updated.dailyGoalLiters) || 2.0,
         reminderEnabled: Boolean(updated.reminderEnabled),
         startTime: updated.startTime,
         endTime: updated.endTime,
-        intervalMinutes: updated.intervalMinutes,
+        intervalMinutes: parseInt(updated.intervalMinutes, 10) || 60,
       },
     });
   } catch (err: any) {
@@ -199,9 +202,9 @@ hydrationRouter.put('/settings', (req: AuthenticatedRequest, res: Response) => {
 });
 
 // POST /api/hydration/log - Log water intake
-hydrationRouter.post('/log', (req: AuthenticatedRequest, res: Response) => {
+hydrationRouter.post('/log', async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const patientId = getAuthorizedPatientId(req, res, req.body.patientId);
+    const patientId = await getAuthorizedPatientId(req, res, req.body.patientId);
     if (!patientId) return;
 
     const { amountMl } = req.body;
@@ -214,10 +217,10 @@ hydrationRouter.post('/log', (req: AuthenticatedRequest, res: Response) => {
     const now = new Date().toISOString();
     const timestampStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
-    db.prepare(`
+    await executeSql(`
       INSERT INTO hydration_logs (id, patient_id, amount_ml, timestamp, logged_at)
       VALUES (?, ?, ?, ?, ?)
-    `).run(id, patientId, amountMl, timestampStr, now);
+    `, [id, patientId, amountMl, timestampStr, now]);
 
     return res.status(201).json({ id, amountMl, timestamp: timestampStr });
   } catch (err: any) {
