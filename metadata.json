@@ -1,0 +1,6 @@
+{
+  "name": "CareSync - Personal Healthcare Companion",
+  "description": "A modern, trustworthy healthcare companion for patients and caregivers to track routines, medications, hydration, and activity.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

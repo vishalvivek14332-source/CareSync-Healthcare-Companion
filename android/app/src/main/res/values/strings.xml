@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">CareSync</string>
+    <string name="title_activity_main">CareSync</string>
+    <string name="package_name">com.caresync.app</string>
+    <string name="custom_url_scheme">com.caresync.app</string>
+</resources>
