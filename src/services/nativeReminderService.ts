@@ -3,8 +3,18 @@ import { Capacitor } from '@capacitor/core';
 import { logMedicationDoseApi } from './api';
 
 export const MEDICATION_ACTION_GROUP = 'MEDICATION_ALARM_ACTIONS';
+export const HYDRATION_NOTIFICATION_CHANNEL = 'hydration-reminders';
+export const MEDICATION_NOTIFICATION_CHANNEL = 'medication-alarms';
 
 let isInitialized = false;
+
+export interface HydrationReminderSettings {
+  dailyGoalLiters: number;
+  reminderEnabled: boolean;
+  startTime: string; // "08:00"
+  endTime: string;   // "20:00"
+  intervalMinutes: number; // 60
+}
 
 /**
  * Initialize native Android LocalNotification channels, permissions, and action button listeners.
@@ -23,9 +33,9 @@ export async function initNativeNotifications(onDoseConfirmed?: (medId: string) 
       await LocalNotifications.requestPermissions();
     }
 
-    // 2. Create high-priority Android alarm channel
+    // 2. Create high-priority Android alarm channel for medications
     await LocalNotifications.createChannel({
-      id: 'medication-alarms',
+      id: MEDICATION_NOTIFICATION_CHANNEL,
       name: 'Medication Alarms',
       description: 'High-priority sound and vibration reminders for scheduled medication doses',
       importance: 5, // IMPORTANCE_HIGH
@@ -36,7 +46,20 @@ export async function initNativeNotifications(onDoseConfirmed?: (medId: string) 
       lightColor: '#0F766E',
     });
 
-    // 3. Register Action Types (Taken & Snooze buttons)
+    // 3. Create gentle hydration reminders channel
+    await LocalNotifications.createChannel({
+      id: HYDRATION_NOTIFICATION_CHANNEL,
+      name: 'Hydration Reminders',
+      description: 'Gentle intervals and routine check-ins to drink water throughout the day',
+      importance: 3, // IMPORTANCE_DEFAULT
+      visibility: 1,
+      sound: undefined,
+      vibration: false,
+      lights: true,
+      lightColor: '#0284C7',
+    });
+
+    // 4. Register Action Types (Taken & Snooze buttons)
     await LocalNotifications.registerActionTypes({
       types: [
         {
@@ -57,7 +80,7 @@ export async function initNativeNotifications(onDoseConfirmed?: (medId: string) 
       ],
     });
 
-    // 4. Register action button tap listeners
+    // 5. Register action button tap listeners
     LocalNotifications.addListener('localNotificationActionPerformed', async (action: ActionPerformed) => {
       console.log('[NativeReminders] Notification Action Performed:', action.actionId, action.notification);
       const extra = action.notification.extra || {};
@@ -73,7 +96,6 @@ export async function initNativeNotifications(onDoseConfirmed?: (medId: string) 
           console.error('[NativeReminders] Failed to transmit TAKEN action to backend:', err);
         }
       } else if (action.actionId === 'SNOOZE') {
-        // Reschedule +10 minutes into the future
         const snoozeTime = new Date(Date.now() + 10 * 60 * 1000);
         const snoozeId = Math.floor(Math.random() * 100000);
         await LocalNotifications.schedule({
@@ -86,7 +108,7 @@ export async function initNativeNotifications(onDoseConfirmed?: (medId: string) 
               sound: 'beep.wav',
               actionTypeId: MEDICATION_ACTION_GROUP,
               extra: extra,
-              channelId: 'medication-alarms',
+              channelId: MEDICATION_NOTIFICATION_CHANNEL,
             },
           ],
         });
@@ -115,7 +137,8 @@ export async function scheduleNativeMedicationAlarm(
     return;
   }
 
-  const notificationId = Math.abs(hashCode(`${medicationId}_${scheduledTime.getTime()}`));
+  // ID range for medications: 100000 - 899999
+  const notificationId = 100000 + (Math.abs(hashCode(`${medicationId}_${scheduledTime.getTime()}`)) % 799999);
 
   await LocalNotifications.schedule({
     notifications: [
@@ -126,8 +149,8 @@ export async function scheduleNativeMedicationAlarm(
         schedule: { at: scheduledTime, allowWhileIdle: true },
         sound: 'beep.wav',
         actionTypeId: MEDICATION_ACTION_GROUP,
-        extra: { medicationId, medicationName, dosage },
-        channelId: 'medication-alarms',
+        extra: { medicationId, medicationName, dosage, type: 'medication' },
+        channelId: MEDICATION_NOTIFICATION_CHANNEL,
       },
     ],
   });
@@ -136,21 +159,20 @@ export async function scheduleNativeMedicationAlarm(
 
 /**
  * Synchronize all native medication alarms for the authenticated patient.
- * Automatically removes stale/deleted alarms and schedules updated alarms.
- * Caregiver devices will cancel alarms and never schedule alarms for other patients.
  */
 export async function syncNativeMedicationAlarms(
   medications: Array<{ id: string; name: string; dosage: string; scheduledTime: string; status?: string; active?: number }>,
   userRole: 'patient' | 'caregiver' = 'patient'
 ) {
-  // 1. If user is a caregiver, cancel any local medication alarms immediately (patient device is the sole alarm owner)
+  // If user is a caregiver, cancel any local medication alarms immediately
   if (userRole !== 'patient') {
     if (Capacitor.isNativePlatform()) {
       try {
         const pending = await LocalNotifications.getPending();
-        if (pending.notifications.length > 0) {
-          await LocalNotifications.cancel({ notifications: pending.notifications });
-          console.log('[NativeReminders] Cancelled pending alarms because user role is caregiver.');
+        const medNotifications = pending.notifications.filter((n) => n.id < 900000);
+        if (medNotifications.length > 0) {
+          await LocalNotifications.cancel({ notifications: medNotifications });
+          console.log('[NativeReminders] Cancelled pending medication alarms because user role is caregiver.');
         }
       } catch (err) {
         console.error('[NativeReminders] Error clearing caregiver alarms:', err);
@@ -160,7 +182,6 @@ export async function syncNativeMedicationAlarms(
     return { scheduledCount: 0, role: userRole, cancelled: true };
   }
 
-  // 2. Filter active, non-taken medications for today on patient device
   const activeMeds = medications.filter((m) => m.active !== 0 && m.status !== 'taken');
 
   if (!Capacitor.isNativePlatform()) {
@@ -170,8 +191,9 @@ export async function syncNativeMedicationAlarms(
 
   try {
     const pending = await LocalNotifications.getPending();
-    if (pending.notifications.length > 0) {
-      await LocalNotifications.cancel({ notifications: pending.notifications });
+    const medNotifications = pending.notifications.filter((n) => n.id < 900000);
+    if (medNotifications.length > 0) {
+      await LocalNotifications.cancel({ notifications: medNotifications });
     }
 
     for (const med of activeMeds) {
@@ -200,6 +222,87 @@ export async function syncNativeMedicationAlarms(
   }
 
   return { scheduledCount: activeMeds.length, role: userRole, cancelled: false };
+}
+
+/**
+ * Synchronize native hydration reminder schedule on patient device.
+ * Hydration reminders are gentle, dismissible, and placed on their own Android channel.
+ * Cancelled if disabled or on caregiver devices.
+ */
+export async function syncNativeHydrationReminders(
+  settings: HydrationReminderSettings,
+  userRole: 'patient' | 'caregiver' = 'patient'
+) {
+  if (userRole !== 'patient' || !settings.reminderEnabled) {
+    if (Capacitor.isNativePlatform()) {
+      try {
+        const pending = await LocalNotifications.getPending();
+        const hydrationPending = pending.notifications.filter((n) => n.id >= 900000);
+        if (hydrationPending.length > 0) {
+          await LocalNotifications.cancel({ notifications: hydrationPending });
+          console.log('[NativeReminders] Cancelled all pending hydration reminders.');
+        }
+      } catch (err) {
+        console.error('[NativeReminders] Error cancelling hydration reminders:', err);
+      }
+    }
+    return { scheduledCount: 0, enabled: false };
+  }
+
+  if (!Capacitor.isNativePlatform()) {
+    console.log(`[NativeReminders:Web Simulation] Hydration reminders active every ${settings.intervalMinutes}m (${settings.startTime} - ${settings.endTime}).`);
+    return { scheduledCount: 8, enabled: true };
+  }
+
+  try {
+    const pending = await LocalNotifications.getPending();
+    const hydrationPending = pending.notifications.filter((n) => n.id >= 900000);
+    if (hydrationPending.length > 0) {
+      await LocalNotifications.cancel({ notifications: hydrationPending });
+    }
+
+    const [startH, startM] = settings.startTime.split(':').map(Number);
+    const [endH, endM] = settings.endTime.split(':').map(Number);
+
+    const intervalMs = settings.intervalMinutes * 60 * 1000;
+    const now = new Date();
+    const notificationsToSchedule = [];
+
+    const startDate = new Date();
+    startDate.setHours(startH, startM, 0, 0);
+
+    const endDate = new Date();
+    endDate.setHours(endH, endM, 0, 0);
+
+    let currentTime = startDate.getTime();
+    let index = 0;
+
+    while (currentTime <= endDate.getTime() && index < 20) {
+      if (currentTime > now.getTime()) {
+        const reminderId = 900000 + index;
+        notificationsToSchedule.push({
+          id: reminderId,
+          title: '💧 Time for a Water Break',
+          body: `Stay refreshed! Drink a glass of water towards your ${settings.dailyGoalLiters}L daily goal.`,
+          schedule: { at: new Date(currentTime), allowWhileIdle: true },
+          channelId: HYDRATION_NOTIFICATION_CHANNEL,
+          extra: { type: 'hydration' },
+        });
+      }
+      currentTime += intervalMs;
+      index++;
+    }
+
+    if (notificationsToSchedule.length > 0) {
+      await LocalNotifications.schedule({ notifications: notificationsToSchedule });
+      console.log(`[NativeReminders] Scheduled ${notificationsToSchedule.length} hydration reminders today.`);
+    }
+
+    return { scheduledCount: notificationsToSchedule.length, enabled: true };
+  } catch (err) {
+    console.error('[NativeReminders] Error scheduling hydration reminders:', err);
+    return { scheduledCount: 0, enabled: false };
+  }
 }
 
 function hashCode(str: string): number {

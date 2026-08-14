@@ -5,6 +5,34 @@ import { getAuthorizedPatientId } from '../authHelper';
 
 export const medicationRouter = Router();
 
+// Helper to validate and normalize medication time (supports 12h AM/PM and 24h)
+export function normalizeScheduledTime(timeStr: string): string | null {
+  if (!timeStr || typeof timeStr !== 'string') return null;
+  const trimmed = timeStr.trim();
+
+  // 12-hour format with AM/PM: e.g. "8:00 AM", "08:00 PM"
+  const match12 = trimmed.match(/^(0?[1-9]|1[0-2]):([0-5]\d)\s*(AM|PM)$/i);
+  if (match12) {
+    const hours = match12[1].padStart(2, '0');
+    const minutes = match12[2];
+    const ampm = match12[3].toUpperCase();
+    return `${hours}:${minutes} ${ampm}`;
+  }
+
+  // 24-hour format: e.g. "08:00", "14:30"
+  const match24 = trimmed.match(/^([01]\d|2[0-3]):([0-5]\d)$/);
+  if (match24) {
+    let hoursNum = parseInt(match24[1], 10);
+    const minutes = match24[2];
+    const ampm = hoursNum >= 12 ? 'PM' : 'AM';
+    if (hoursNum === 0) hoursNum = 12;
+    else if (hoursNum > 12) hoursNum -= 12;
+    return `${String(hoursNum).padStart(2, '0')}:${minutes} ${ampm}`;
+  }
+
+  return null;
+}
+
 // GET all medications for patient with today's status
 medicationRouter.get('/', (req: AuthenticatedRequest, res: Response) => {
   try {
@@ -49,6 +77,11 @@ medicationRouter.post('/', (req: AuthenticatedRequest, res: Response) => {
       return res.status(400).json({ error: 'Name, dosage, and scheduled time are required' });
     }
 
+    const normalizedTime = normalizeScheduledTime(scheduledTime);
+    if (!normalizedTime) {
+      return res.status(400).json({ error: 'Invalid scheduled time format. Use HH:mm or hh:mm AM/PM' });
+    }
+
     const id = `med-${Date.now()}`;
     const now = new Date().toISOString();
     const todayStr = now.split('T')[0];
@@ -64,7 +97,7 @@ medicationRouter.post('/', (req: AuthenticatedRequest, res: Response) => {
     db.prepare(`
       INSERT INTO medications (id, patient_id, name, dosage, scheduled_time, instructions, category, color, active, created_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
-    `).run(id, patientId, name, dosage, scheduledTime, instructions || 'Take as prescribed', category, defaultColor, now);
+    `).run(id, patientId, name.trim(), dosage.trim(), normalizedTime, (instructions || 'Take as prescribed').trim(), category, defaultColor, now);
 
     // Initial log entry for today
     db.prepare(`
@@ -75,10 +108,10 @@ medicationRouter.post('/', (req: AuthenticatedRequest, res: Response) => {
     const newMed = {
       id,
       patientId,
-      name,
-      dosage,
-      scheduledTime,
-      instructions: instructions || 'Take as prescribed',
+      name: name.trim(),
+      dosage: dosage.trim(),
+      scheduledTime: normalizedTime,
+      instructions: (instructions || 'Take as prescribed').trim(),
       status: 'due',
       category,
       color: defaultColor,
@@ -103,6 +136,14 @@ medicationRouter.put('/:id', (req: AuthenticatedRequest, res: Response) => {
 
     const { name, dosage, scheduledTime, instructions, category } = req.body;
 
+    let normalizedTime: string | null = null;
+    if (scheduledTime) {
+      normalizedTime = normalizeScheduledTime(scheduledTime);
+      if (!normalizedTime) {
+        return res.status(400).json({ error: 'Invalid scheduled time format. Use HH:mm or hh:mm AM/PM' });
+      }
+    }
+
     db.prepare(`
       UPDATE medications
       SET name = COALESCE(?, name),
@@ -111,7 +152,7 @@ medicationRouter.put('/:id', (req: AuthenticatedRequest, res: Response) => {
           instructions = COALESCE(?, instructions),
           category = COALESCE(?, category)
       WHERE id = ?
-    `).run(name, dosage, scheduledTime, instructions, category, id);
+    `).run(name ? name.trim() : null, dosage ? dosage.trim() : null, normalizedTime, instructions ? instructions.trim() : null, category ?? null, id);
 
     const updatedMed = db.prepare(`
       SELECT m.id, m.name, m.dosage, m.scheduled_time as scheduledTime,
@@ -125,7 +166,7 @@ medicationRouter.put('/:id', (req: AuthenticatedRequest, res: Response) => {
   }
 });
 
-// DELETE medication (CRUD - Delete)
+// DELETE medication (CRUD - Delete / Deactivate)
 medicationRouter.delete('/:id', (req: AuthenticatedRequest, res: Response) => {
   try {
     const { id } = req.params;
@@ -136,6 +177,10 @@ medicationRouter.delete('/:id', (req: AuthenticatedRequest, res: Response) => {
     if (!patientId) return;
 
     db.prepare('UPDATE medications SET active = 0 WHERE id = ?').run(id);
+
+    // Cancel any active escalation states for this medication
+    db.prepare("UPDATE medication_escalation_states SET status = 'resolved' WHERE medication_id = ? AND status = 'active'").run(id);
+
     return res.json({ message: 'Medication removed successfully' });
   } catch (err: any) {
     return res.status(500).json({ error: 'Failed to delete medication' });

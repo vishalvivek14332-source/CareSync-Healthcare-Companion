@@ -14,8 +14,10 @@ import {
   CheckCircle2,
   Sparkles,
   ArrowLeft,
+  Server,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
+import { ServerSettingsModal } from '../common/ServerSettingsModal';
 
 export const AuthLandingView: React.FC = () => {
   const { login, signup, loginDemoUser, addToast } = useCareSync();
@@ -23,6 +25,7 @@ export const AuthLandingView: React.FC = () => {
   const [selectedRole, setSelectedRole] = useState<UserRole | null>(null);
   const [authMode, setAuthMode] = useState<'signup' | 'login'>('signup');
   const [loading, setLoading] = useState<boolean>(false);
+  const [serverSettingsOpen, setServerSettingsOpen] = useState<boolean>(false);
 
   // Form Fields
   const [name, setName] = useState<string>('');
@@ -374,9 +377,24 @@ export const AuthLandingView: React.FC = () => {
       </div>
 
       {/* Footer Info */}
-      <div className="max-w-md mx-auto text-center text-xs text-slate-400 font-medium">
-        CareSync HIPAA-aligned architecture • Strict RBAC & Local Alarm Security
+      <div className="max-w-md mx-auto text-center text-xs text-slate-400 font-medium space-y-2">
+        <div>CareSync HIPAA-aligned architecture • Strict RBAC & Local Alarm Security</div>
+        <div>
+          <button
+            type="button"
+            onClick={() => setServerSettingsOpen(true)}
+            className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-stone-500 hover:text-teal-800 bg-stone-100 hover:bg-teal-50 px-3 py-1.5 rounded-full border border-stone-200/80 transition-colors"
+          >
+            <Server className="w-3.5 h-3.5 text-teal-700" />
+            Backend Connection Settings
+          </button>
+        </div>
       </div>
+
+      <ServerSettingsModal
+        isOpen={serverSettingsOpen}
+        onClose={() => setServerSettingsOpen(false)}
+      />
     </div>
   );
 };

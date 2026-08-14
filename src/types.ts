@@ -4,13 +4,15 @@ export type PatientTab = 'home' | 'medication' | 'hydration' | 'activity' | 'rou
 export type CaregiverTab = 'overview' | 'patient' | 'alerts' | 'escalation' | 'settings';
 
 export type MedicationStatus = 'taken' | 'due' | 'missed' | 'upcoming';
+export type SyncStatus = 'ONLINE' | 'SYNCING' | 'OFFLINE';
 
 export interface Medication {
   id: string;
   name: string;
   dosage: string;
   scheduledTime: string; // e.g. "08:00 AM"
-  instructions: string; // e.g. "Take 1 tablet with warm water after food"
+  timezone?: string;     // e.g. "America/New_York"
+  instructions: string;  // e.g. "Take 1 tablet with warm water after food"
   status: MedicationStatus;
   takenAt?: string;
   category: 'morning' | 'afternoon' | 'evening';
@@ -23,29 +25,41 @@ export interface HydrationLog {
   timestamp: string;
 }
 
+export interface HydrationSettings {
+  dailyGoalLiters: number;
+  reminderEnabled: boolean;
+  startTime: string; // "08:00"
+  endTime: string;   // "20:00"
+  intervalMinutes: number; // 60
+  timezone?: string;
+}
+
 export interface HydrationState {
-  currentLiters: number; // e.g., 1.4
-  goalLiters: number; // e.g., 2.0
+  currentLiters: number;
+  goalLiters: number;
   logs: HydrationLog[];
   nextReminderTime: string;
   hourlyTrends: { hour: string; liters: number }[];
+  settings?: HydrationSettings;
 }
 
 export interface ActivityState {
-  steps: number; // e.g., 4821
-  stepGoal: number; // e.g., 5000
-  activeMinutes: number; // e.g., 32
-  activeMinutesGoal: number; // 30
-  caloriesBurned: number; // e.g., 185
-  distanceKm: number; // e.g., 3.2
-  weeklySteps: { day: string; steps: number; goal: number }[];
+  steps: number;
+  stepGoal: number;
+  activeMinutes: number;
+  activeMinutesGoal: number;
+  caloriesBurned: number;
+  distanceKm: number;
+  weeklySteps: { day: string; steps: number; goal: number; date?: string }[];
   isTrackingActive: boolean;
+  hasRecordedActivityToday?: boolean;
   activeSessionType?: 'walk' | 'jog';
   activeSessionSeconds?: number;
 }
 
 export interface RoutineItem {
   id: string;
+  patientId?: string;
   title: string;
   time: string;
   completed: boolean;
@@ -55,11 +69,12 @@ export interface RoutineItem {
 
 export interface CareScoreBreakdown {
   totalScore: number; // 0 - 100
-  medicationScore: number; // e.g. 96
-  hydrationScore: number; // e.g. 72
-  activityScore: number; // e.g. 85
-  routineScore: number; // e.g. 90
+  medicationScore: number;
+  hydrationScore: number;
+  activityScore: number;
+  routineScore: number;
   weeklyScores: { day: string; score: number }[];
+  isNewSetup?: boolean;
 }
 
 export interface RoutineInsight {
@@ -68,7 +83,7 @@ export interface RoutineInsight {
   title: string;
   description: string;
   timestamp: string;
-  isDiagnostic: false; // Mandatory flag confirming non-diagnostic nature
+  isDiagnostic: false;
 }
 
 export type AlertSeverity = 'low' | 'medium' | 'high' | 'emergency';
@@ -130,7 +145,9 @@ export interface UserProfile {
   role: UserRole;
   name: string;
   age?: number;
+  phone?: string;
   avatarUrl?: string;
+  timezone?: string;
   primaryCaregiver?: string;
   caregiverPhone?: string;
   emergencyContact?: string;

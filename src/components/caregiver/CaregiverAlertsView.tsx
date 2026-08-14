@@ -10,7 +10,7 @@ export const CaregiverAlertsView: React.FC = () => {
   const unreadCount = alerts.filter((a) => !a.reviewed).length;
   const importantCount = alerts.filter((a) => a.severity === 'high' || a.severity === 'emergency').length;
   const attentionCount = alerts.filter((a) => a.severity === 'medium').length;
-  const normalCount = alerts.filter((a) => a.severity === 'low' || a.severity === 'info').length;
+  const normalCount = alerts.filter((a) => a.severity === 'low').length;
   const resolvedCount = alerts.filter((a) => a.reviewed).length;
 
   const filteredAlerts = alerts.filter((a) => {
@@ -23,7 +23,7 @@ export const CaregiverAlertsView: React.FC = () => {
       return a.severity === 'medium';
     }
     if (filterSeverity === 'normal' || filterSeverity === 'low') {
-      return a.severity === 'low' || a.severity === 'info';
+      return a.severity === 'low';
     }
     return true;
   });

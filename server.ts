@@ -1,9 +1,13 @@
-import express from "express";
+import express, { Request, Response, NextFunction } from "express";
 import path from "path";
+import helmet from "helmet";
+import cors from "cors";
+import rateLimit from "express-rate-limit";
+import { v4 as uuidv4 } from "uuid";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI } from "@google/genai";
-import dotenv from "dotenv";
-import { initDb, db } from "./server/db";
+import { config } from "./server/config";
+import { initDb, db, checkDatabaseHealth, pgPool } from "./server/db";
 import { authenticateToken, AuthenticatedRequest } from "./server/auth";
 import { authRouter } from "./server/routes/authRoutes";
 import { patientRouter } from "./server/routes/patientRoutes";
@@ -16,48 +20,132 @@ import { escalationRouter } from "./server/routes/escalationRoutes";
 import { notificationRouter } from "./server/routes/notificationRoutes";
 import { startEscalationWorker, stopEscalationWorker } from "./server/services/escalationWorker";
 
-dotenv.config();
-
 async function startServer() {
-  // Initialize SQLite Database Schema & Seed default records if empty
-  initDb();
+  // 1. Initialize Database (PostgreSQL in production, SQLite in local dev/test)
+  await initDb();
 
-  // Start background escalation worker (checks every 15s)
+  // 2. Start background escalation worker (checks every 15s)
   startEscalationWorker(15000);
 
   const app = express();
-  const PORT = Number(process.env.PORT) || 3000;
 
-  app.use(express.json());
+  // 3. Security Headers via Helmet
+  app.use(
+    helmet({
+      contentSecurityPolicy: false, // Vite handles CSP in dev
+      crossOriginEmbedderPolicy: false,
+    })
+  );
 
-  // Security Headers Middleware
-  app.use((_req, res, next) => {
-    res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.setHeader('X-Frame-Options', 'DENY');
-    res.setHeader('X-XSS-Protection', '1; mode=block');
-    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  // 4. Strict CORS Configuration
+  app.use(
+    cors({
+      origin: (origin, callback) => {
+        // Allow requests with no origin (mobile native apps, curl, server-to-server)
+        if (!origin) return callback(null, true);
+
+        const allowedOrigins = [
+          ...config.corsAllowedOrigins,
+          "capacitor://localhost",
+          "http://localhost",
+        ];
+
+        // In non-production, also allow dev loops on localhost
+        if (!config.isProduction) {
+          if (origin.startsWith("http://localhost:") || origin.startsWith("http://127.0.0.1:")) {
+            return callback(null, true);
+          }
+        }
+
+        if (allowedOrigins.includes(origin)) {
+          return callback(null, true);
+        }
+
+        return callback(new Error(`Origin ${origin} not permitted by CORS policy`));
+      },
+      credentials: true,
+      methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+      allowedHeaders: ["Content-Type", "Authorization", "X-Request-ID", "X-Requested-With"],
+    })
+  );
+
+  // 5. Request ID & Structured Request Logging Middleware
+  app.use((req: Request, res: Response, next: NextFunction) => {
+    const requestId = (req.headers["x-request-id"] as string) || uuidv4();
+    res.setHeader("X-Request-ID", requestId);
+    const start = Date.now();
+
+    res.on("finish", () => {
+      const duration = Date.now() - start;
+      const statusCode = res.statusCode;
+      if (req.path !== "/api/health" && req.path !== "/api/health/ready") {
+        console.log(`[${new Date().toISOString()}] [${requestId.substring(0, 8)}] ${req.method} ${req.originalUrl} -> ${statusCode} (${duration}ms)`);
+      }
+    });
+
     next();
   });
 
-  // Initialize Gemini AI client if API key exists
+  // 6. JSON Parser with payload limits
+  app.use(express.json({ limit: "5mb" }));
+
+  // 7. Rate Limiting for Auth Endpoints
+  const authLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: 100, // Max 100 requests per IP per 15 minutes
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: "Too many authentication attempts. Please try again later." },
+  });
+  app.use("/api/auth/login", authLimiter);
+  app.use("/api/auth/signup", authLimiter);
+
+  // 8. Health & Readiness Endpoints
+  app.get("/api/health", (_req, res) => {
+    res.json({
+      status: "ok",
+      uptimeSeconds: Math.floor(process.uptime()),
+      timestamp: new Date().toISOString(),
+      environment: config.nodeEnv,
+    });
+  });
+
+  app.get("/api/health/ready", async (_req, res) => {
+    const dbHealth = await checkDatabaseHealth();
+    if (!dbHealth.ok) {
+      return res.status(503).json({
+        status: "not_ready",
+        database: {
+          ok: false,
+          type: dbHealth.type,
+        },
+        timestamp: new Date().toISOString(),
+      });
+    }
+    return res.json({
+      status: "ready",
+      database: {
+        ok: true,
+        type: dbHealth.type,
+      },
+      timestamp: new Date().toISOString(),
+    });
+  });
+
+  // 9. Initialize Gemini AI client if API key exists
   let ai: GoogleGenAI | null = null;
   if (process.env.GEMINI_API_KEY) {
     ai = new GoogleGenAI({
       apiKey: process.env.GEMINI_API_KEY,
       httpOptions: {
         headers: {
-          'User-Agent': 'aistudio-build',
+          "User-Agent": "aistudio-build",
         },
       },
     });
   }
 
-  // Health check endpoint
-  app.get("/api/health", (_req, res) => {
-    res.json({ status: "ok", database: "connected", timestamp: new Date().toISOString() });
-  });
-
-  // Mount API Routers
+  // 10. Mount API Routers
   app.use("/api/auth", authRouter);
   app.use("/api/patient", authenticateToken, patientRouter);
   app.use("/api/medications", authenticateToken, medicationRouter);
@@ -68,7 +156,7 @@ async function startServer() {
   app.use("/api/escalation", authenticateToken, escalationRouter);
   app.use("/api/notifications", authenticateToken, notificationRouter);
 
-  // CareSync Assistant AI endpoint (context-aware & server-side Gemini)
+  // 11. CareSync Assistant AI endpoint
   app.post("/api/assistant", authenticateToken, async (req: AuthenticatedRequest, res) => {
     try {
       const { message, context } = req.body;
@@ -77,75 +165,52 @@ async function startServer() {
         return res.status(400).json({ error: "Message is required" });
       }
 
-      const patientId = req.user?.userId || 'p-1';
-      const patient = db.prepare('SELECT name FROM users WHERE id = ?').get(patientId) as any;
+      const patientId = req.user?.userId || "p-1";
+      const patient = db.prepare("SELECT name FROM users WHERE id = ?").get(patientId) as any;
       const patientName = patient?.name || context?.patientName || "Alex Johnson";
 
-      // If Gemini client is available, call Gemini API
       if (ai) {
         const systemInstruction = `You are CareSync Assistant, a warm, supportive, and reliable healthcare & routine companion for elderly individuals, patients, and their family caregivers.
 Your job is to help users manage daily health routines, including medications, hydration, walking/activity, and wellness logs.
+- Never provide medical diagnosis or replace a doctor.
+- Keep responses friendly, encouraging, large, and concise.`;
 
-IMPORTANT COMPLIANCE RULES:
-- You are a wellness and routine companion. You do NOT give medical diagnoses or prescribe medical treatment.
-- Keep responses conversational, concise, encouraging, and clear.
-- Avoid jargon or complex medical text.
-- Large, simple sentences that are easy to read and understand.
-- Always be gentle, friendly, and empowering.
-
-User Context provided:
-- Patient Name: ${patientName}
-- Morning Medication: ${context?.medicationStatus?.morning || "Taken"}
-- Afternoon Medication: ${context?.medicationStatus?.afternoon || "Due soon"}
-- Evening Medication: ${context?.medicationStatus?.evening || "Upcoming"}
-- Hydration: ${context?.hydration?.current || 1.4}L of ${context?.hydration?.target || 2.0}L goal
-- Activity: ${context?.activity?.steps || 4821} steps of ${context?.activity?.target || 5000} target
-- CareScore: ${context?.careScore || 86}/100
-
-If the user asks to log something (e.g., "I drank 250 ml of water", "I took my afternoon med", "I walked for 20 minutes"), acknowledge it warmly and confirm the action. Respond in clear, friendly English. Keep under 3-4 sentences.`;
-
+        const prompt = `System: ${systemInstruction}\nUser message: "${message}"\nPatient Name: ${patientName}`;
         const response = await ai.models.generateContent({
-          model: "gemini-3.6-flash",
-          contents: message,
-          config: {
-            systemInstruction,
-            temperature: 0.7,
-          },
+          model: "gemini-2.5-flash",
+          contents: prompt,
         });
 
-        const reply = response.text || "I'm here to help you with your daily routine! How can I assist you today?";
-        return res.json({ reply });
+        return res.json({ reply: response.text });
       } else {
-        // Fallback intelligent response if GEMINI_API_KEY is not set yet
         const lowerMsg = message.toLowerCase();
-        let fallbackReply = "I'm here to help you stay on track with your routines! ";
-
-        if (lowerMsg.includes("what do i need to do") || lowerMsg.includes("schedule") || lowerMsg.includes("routine")) {
-          fallbackReply = "You have your Afternoon Medication due at 1:00 PM, and you are 600 ml away from your daily hydration goal. Great job on completing your morning walk!";
-        } else if (lowerMsg.includes("water") || lowerMsg.includes("drink") || lowerMsg.includes("hydration")) {
-          fallbackReply = `You've logged ${context?.hydration?.current || 1.4} L of your ${context?.hydration?.target || 2.0} L target today. Drinking one glass (250 ml) now will put you closer to your goal!`;
-        } else if (lowerMsg.includes("medication") || lowerMsg.includes("medicine") || lowerMsg.includes("pill")) {
-          fallbackReply = "Your Morning Medication (Vitamin D + Lisinopril) was taken at 8:00 AM. Your Afternoon Medication is scheduled for 1:00 PM.";
-        } else if (lowerMsg.includes("walk") || lowerMsg.includes("steps") || lowerMsg.includes("exercise")) {
-          fallbackReply = `You have completed ${context?.activity?.steps || 4821} steps out of your ${context?.activity?.target || 5000} goal today. You're just a short stroll away from reaching your target!`;
-        } else if (lowerMsg.includes("score") || lowerMsg.includes("carescore")) {
-          fallbackReply = `Your CareScore today is ${context?.careScore || 86}/100! Your medication adherence is excellent, and a quick water break will boost your hydration score.`;
-        } else {
-          fallbackReply = `I'm here with you, ${patientName}. Your routine is in great shape today. What would you like to log or check on?`;
+        let fallbackReply = `I'm here with you, ${patientName}. What would you like to log or check on?`;
+        if (lowerMsg.includes("water") || lowerMsg.includes("drink")) {
+          fallbackReply = `You have logged ${context?.hydration?.current || 0}L of water today towards your ${context?.hydration?.goal || 2}L goal!`;
+        } else if (lowerMsg.includes("walk") || lowerMsg.includes("step")) {
+          fallbackReply = `You have logged ${context?.activity?.steps || 0} steps today!`;
         }
-
         return res.json({ reply: fallbackReply });
       }
     } catch (err: any) {
       console.error("Error in /api/assistant:", err);
       return res.status(500).json({
-        reply: "I'm having a little trouble connecting right now, but your morning routine looks great! Please try asking again in a moment.",
+        reply: "I'm having a little trouble connecting right now, but your routine is on track! Please try asking again in a moment.",
       });
     }
   });
 
-  // Vite middleware for development
-  if (process.env.NODE_ENV !== "production") {
+  // 12. Catch unhandled /api/* routes with JSON 404 (prevent SPA HTML fallback on API endpoints)
+  app.all("/api/*", (req: Request, res: Response) => {
+    res.status(404).json({
+      error: "API endpoint not found",
+      method: req.method,
+      path: req.path,
+    });
+  });
+
+  // 13. Frontend Static Delivery or Vite Middleware
+  if (config.nodeEnv !== "production") {
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",
@@ -159,18 +224,33 @@ If the user asks to log something (e.g., "I drank 250 ml of water", "I took my a
     });
   }
 
-  const serverInstance = app.listen(PORT, "0.0.0.0", () => {
-    console.log(`CareSync server running on http://localhost:${PORT}`);
+  // 14. Start HTTP Server
+  const serverInstance = app.listen(config.port, "0.0.0.0", () => {
+    console.log(`================================================================`);
+    console.log(`🚀 CareSync Server Running`);
+    console.log(`   - Environment:   ${config.nodeEnv}`);
+    console.log(`   - Port:          ${config.port}`);
+    console.log(`   - Database Type: ${pgPool ? "PostgreSQL (Pool Active)" : "SQLite (Dev/Test)"}`);
+    console.log(`   - JWT Secrets:   ${config.jwtAccessSecret ? "Configured" : "Missing"}`);
+    console.log(`   - Database URL:  ${config.databaseUrl ? "Configured" : "None"}`);
+    console.log(`   - CORS Origins:  ${config.corsAllowedOrigins.join(", ")}`);
+    console.log(`================================================================`);
   });
 
+  // 14. Graceful Shutdown Handler
   const gracefulShutdown = () => {
-    console.log("\n[Server] Shutting down gracefully...");
+    console.log("\n🛑 [Server] Received shutdown signal. Closing resources gracefully...");
     stopEscalationWorker();
-    serverInstance.close(() => {
+    serverInstance.close(async () => {
       try {
+        if (pgPool) {
+          await pgPool.end();
+          console.log("   - PostgreSQL connection pool closed.");
+        }
         db.close();
+        console.log("   - SQLite instance closed.");
       } catch (e) {}
-      console.log("[Server] HTTP server & Database closed cleanly.");
+      console.log("✅ CareSync server shut down cleanly.");
       process.exit(0);
     });
   };
@@ -179,4 +259,7 @@ If the user asks to log something (e.g., "I drank 250 ml of water", "I took my a
   process.on("SIGTERM", gracefulShutdown);
 }
 
-startServer();
+startServer().catch((err) => {
+  console.error("❌ Fatal error starting CareSync server:", err);
+  process.exit(1);
+});

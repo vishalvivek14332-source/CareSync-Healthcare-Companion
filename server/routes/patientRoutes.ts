@@ -1,15 +1,20 @@
 import { Router, Response } from 'express';
 import { db } from '../db';
 import { AuthenticatedRequest } from '../auth';
+import { getAuthorizedPatientId } from '../authHelper';
 import { getActiveConnectionCode, createConnectionCodeForPatient, revokeConnectionCode } from '../services/connectionCodeService';
+import { saveProfileAvatar } from '../services/storageService';
 
 export const patientRouter = Router();
 
+// GET /api/patient/profile
 patientRouter.get('/profile', (req: AuthenticatedRequest, res: Response) => {
   try {
-    const patientId = req.query.patientId as string || req.user?.userId || 'p-1';
+    const patientId = getAuthorizedPatientId(req, res, req.query.patientId as string);
+    if (!patientId) return;
+
     const user = db.prepare(`
-      SELECT id, name, age, avatar_url as avatarUrl, primary_caregiver as primaryCaregiver,
+      SELECT id, email, role, name, age, phone, avatar_url as avatarUrl, timezone, primary_caregiver as primaryCaregiver,
              caregiver_phone as caregiverPhone, emergency_contact as emergencyContact,
              emergency_phone as emergencyPhone, quiet_hours as quietHours
       FROM users WHERE id = ?
@@ -34,10 +39,13 @@ patientRouter.get('/profile', (req: AuthenticatedRequest, res: Response) => {
   }
 });
 
+// PUT /api/patient/profile
 patientRouter.put('/profile', (req: AuthenticatedRequest, res: Response) => {
   try {
-    const patientId = req.user?.userId || 'p-1';
-    const { name, age, primaryCaregiver, caregiverPhone, emergencyContact, emergencyPhone, quietHours } = req.body;
+    const patientId = getAuthorizedPatientId(req, res, req.body.patientId);
+    if (!patientId) return;
+
+    const { name, age, primaryCaregiver, caregiverPhone, emergencyContact, emergencyPhone, quietHours, timezone } = req.body;
 
     db.prepare(`
       UPDATE users
@@ -47,18 +55,63 @@ patientRouter.put('/profile', (req: AuthenticatedRequest, res: Response) => {
           caregiver_phone = COALESCE(?, caregiver_phone),
           emergency_contact = COALESCE(?, emergency_contact),
           emergency_phone = COALESCE(?, emergency_phone),
-          quiet_hours = COALESCE(?, quiet_hours)
+          quiet_hours = COALESCE(?, quiet_hours),
+          timezone = COALESCE(?, timezone)
       WHERE id = ?
-    `).run(name, age, primaryCaregiver, caregiverPhone, emergencyContact, emergencyPhone, quietHours, patientId);
+    `).run(
+      name ?? null,
+      age ?? null,
+      primaryCaregiver ?? null,
+      caregiverPhone ?? null,
+      emergencyContact ?? null,
+      emergencyPhone ?? null,
+      quietHours ?? null,
+      timezone ?? null,
+      patientId
+    );
 
-    const updated = db.prepare('SELECT * FROM users WHERE id = ?').get(patientId);
+    const updated = db.prepare(`
+      SELECT id, email, role, name, age, phone, avatar_url as avatarUrl, timezone, primary_caregiver as primaryCaregiver,
+             caregiver_phone as caregiverPhone, emergency_contact as emergencyContact,
+             emergency_phone as emergencyPhone, quiet_hours as quietHours
+      FROM users WHERE id = ?
+    `).get(patientId);
+
     return res.json(updated);
   } catch (err: any) {
     return res.status(500).json({ error: 'Failed to update patient profile' });
   }
 });
 
-// GET active connection code for current patient
+// PUT /api/patient/avatar - Save profile photo using object storage abstraction
+patientRouter.put('/avatar', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const userId = req.user?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const { avatarUrl } = req.body;
+    if (!avatarUrl || typeof avatarUrl !== 'string') {
+      return res.status(400).json({ error: 'avatarUrl is required' });
+    }
+
+    let finalUrl = avatarUrl;
+    if (avatarUrl.startsWith('data:image/')) {
+      const uploadResult = await saveProfileAvatar(avatarUrl, userId);
+      finalUrl = uploadResult.url;
+    }
+
+    db.prepare('UPDATE users SET avatar_url = ? WHERE id = ?').run(finalUrl, userId);
+
+    return res.json({ success: true, avatarUrl: finalUrl });
+  } catch (err: any) {
+    console.error('Update avatar error:', err);
+    return res.status(400).json({ error: err.message || 'Failed to update profile photo' });
+  }
+});
+
+// GET /api/patient/connection-code
 patientRouter.get('/connection-code', (req: AuthenticatedRequest, res: Response) => {
   try {
     if (req.user?.role !== 'patient') {
@@ -78,7 +131,7 @@ patientRouter.get('/connection-code', (req: AuthenticatedRequest, res: Response)
   }
 });
 
-// POST generate new connection code (revokes old ones)
+// POST /api/patient/connection-code/generate
 patientRouter.post('/connection-code/generate', (req: AuthenticatedRequest, res: Response) => {
   try {
     if (req.user?.role !== 'patient') {
@@ -94,7 +147,7 @@ patientRouter.post('/connection-code/generate', (req: AuthenticatedRequest, res:
   }
 });
 
-// POST revoke connection code
+// POST /api/patient/connection-code/revoke
 patientRouter.post('/connection-code/revoke', (req: AuthenticatedRequest, res: Response) => {
   try {
     if (req.user?.role !== 'patient') {

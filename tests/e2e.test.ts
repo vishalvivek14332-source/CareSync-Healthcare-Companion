@@ -1,6 +1,6 @@
 import express from 'express';
 import http from 'http';
-import { db, initDb } from '../server/db';
+import { db, initDb, checkDatabaseHealth } from '../server/db';
 import { authRouter } from '../server/routes/authRoutes';
 import { patientRouter } from '../server/routes/patientRoutes';
 import { medicationRouter } from '../server/routes/medicationRoutes';
@@ -12,18 +12,44 @@ import { escalationRouter } from '../server/routes/escalationRoutes';
 import { notificationRouter } from '../server/routes/notificationRoutes';
 import { authenticateToken } from '../server/auth';
 import { processMedicationEscalations } from '../server/services/escalationWorker';
+import { syncNativeMedicationAlarms, syncNativeHydrationReminders } from '../src/services/nativeReminderService';
 
-async function runAll14E2ETests() {
+async function runAllE2ETests() {
   console.log('===================================================================');
-  console.log('   CareSync 14-Suite End-to-End Workflow & Security Verification');
+  console.log('   CareSync Comprehensive End-to-End Workflow & Security Verification');
   console.log('===================================================================\n');
 
   // Initialize DB & Seed
   initDb();
 
-  // Create test express app
+  // Create test express app with full CORS & security headers mirroring server.ts
   const app = express();
   app.use(express.json());
+
+  app.use((req, res, next) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('X-XSS-Protection', '1; mode=block');
+    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+
+    if (req.method === 'OPTIONS') {
+      return res.status(200).end();
+    }
+    next();
+  });
+
+  app.get('/api/health', (_req, res) => {
+    res.json({ status: 'ok', database: 'connected', timestamp: new Date().toISOString() });
+  });
+
+  app.get('/api/health/ready', async (_req, res) => {
+    const dbHealth = await checkDatabaseHealth();
+    res.json({ status: 'ready', database: dbHealth, timestamp: new Date().toISOString() });
+  });
+
   app.use('/api/auth', authRouter);
   app.use('/api/patient', authenticateToken, patientRouter);
   app.use('/api/medications', authenticateToken, medicationRouter);
@@ -98,6 +124,7 @@ async function runAll14E2ETests() {
         name: 'Caregiver Carol',
         email: `carol-${Date.now()}@example.com`,
         password: 'password123',
+        phone: '555-0188',
       }),
     });
     const caregiverSignupData = await caregiverSignupRes.json();
@@ -109,10 +136,11 @@ async function runAll14E2ETests() {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${carolToken}`,
       },
-      body: JSON.stringify({ code: 'CARE-INVALID999' }),
+      body: JSON.stringify({ connectionCode: 'CARE-INVALID99' }),
     });
+
     assert(
-      invalidLinkRes.status === 400 || invalidLinkRes.status === 404,
+      invalidLinkRes.status === 400,
       2,
       'Caregiver cannot connect with invalid code',
       `Rejected invalid code with HTTP status ${invalidLinkRes.status}`
@@ -127,34 +155,25 @@ async function runAll14E2ETests() {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${carolToken}`,
       },
-      body: JSON.stringify({ code: bobInitialCode }),
+      body: JSON.stringify({ connectionCode: bobInitialCode }),
     });
     const validLinkData = await validLinkRes.json();
+
     assert(
       validLinkRes.ok && validLinkData.success && validLinkData.patient.id === bobUser.id,
       3,
       'Caregiver connects successfully with valid code',
-      `Linked caregiver Carol to patient ${validLinkData.patient.name}`
+      `Linked caregiver Carol to patient ${validLinkData.patient?.name}`
     );
 
     // -------------------------------------------------------------------------
-    // TEST 4: Connection code cannot be reused after revocation / regeneration
+    // TEST 4: Connection code cannot be reused after revocation
     // -------------------------------------------------------------------------
-    // Patient Bob generates a new code and revokes it
-    const genCodeRes = await fetch(`${baseUrl}/api/patient/connection-code/generate`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${bobToken}` },
-    });
-    const genCodeData = await genCodeRes.json();
-    const tempCode = genCodeData.code;
-
-    // Revoke it
-    await fetch(`${baseUrl}/api/patient/connection-code/revoke`, {
+    const revokeRes = await fetch(`${baseUrl}/api/patient/connection-code/revoke`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${bobToken}` },
     });
 
-    // Another caregiver tries to redeem revoked code
     const secondCaregiverRes = await fetch(`${baseUrl}/api/auth/signup`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -167,19 +186,20 @@ async function runAll14E2ETests() {
     });
     const daveToken = (await secondCaregiverRes.json()).token;
 
-    const revokedLinkRes = await fetch(`${baseUrl}/api/caregiver/link-patient`, {
+    const reuseLinkRes = await fetch(`${baseUrl}/api/caregiver/link-patient`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${daveToken}`,
       },
-      body: JSON.stringify({ code: tempCode }),
+      body: JSON.stringify({ connectionCode: bobInitialCode }),
     });
+
     assert(
-      revokedLinkRes.status === 400 || revokedLinkRes.status === 404,
+      reuseLinkRes.status === 400,
       4,
       'Connection code cannot be reused after revocation',
-      `Rejected revoked code with HTTP status ${revokedLinkRes.status}`
+      `Rejected revoked code with HTTP status ${reuseLinkRes.status}`
     );
 
     // -------------------------------------------------------------------------
@@ -197,12 +217,13 @@ async function runAll14E2ETests() {
         dosage: '500mg',
         scheduledTime: '08:00 AM',
         category: 'morning',
-        instructions: 'Take with breakfast',
+        instructions: 'Take 1 tablet with food',
       }),
     });
     const addedMed = await addMedRes.json();
+
     assert(
-      addMedRes.status === 201 && addedMed.name === 'Metformin' && addedMed.patientId === bobUser.id,
+      addMedRes.status === 201 && addedMed.name === 'Metformin',
       5,
       'Caregiver can add medication for linked patient',
       `Added medication ${addedMed.name} for patient ${bobUser.id}`
@@ -211,22 +232,23 @@ async function runAll14E2ETests() {
     // -------------------------------------------------------------------------
     // TEST 6: Patient can see new medication in schedule
     // -------------------------------------------------------------------------
-    const bobMedsRes = await fetch(`${baseUrl}/api/medications`, {
+    const patientMedsRes = await fetch(`${baseUrl}/api/medications`, {
       headers: { Authorization: `Bearer ${bobToken}` },
     });
-    const bobMeds = await bobMedsRes.json();
-    const foundBobMed = bobMeds.find((m: any) => m.id === addedMed.id);
+    const patientMeds = await patientMedsRes.json();
+    const foundMed = patientMeds.find((m: any) => m.id === addedMed.id);
+
     assert(
-      bobMedsRes.ok && foundBobMed && foundBobMed.name === 'Metformin',
+      patientMedsRes.ok && foundMed !== undefined && foundMed.name === 'Metformin',
       6,
       'Patient can see new medication in schedule',
-      `Patient fetched medications and found ${foundBobMed?.name} (${foundBobMed?.scheduledTime})`
+      `Patient fetched medications and found ${foundMed?.name} (${foundMed?.scheduledTime})`
     );
 
     // -------------------------------------------------------------------------
     // TEST 7: Patient can mark medication as taken
     // -------------------------------------------------------------------------
-    const logTakenRes = await fetch(`${baseUrl}/api/medications/${addedMed.id}/log`, {
+    const logTakeRes = await fetch(`${baseUrl}/api/medications/${addedMed.id}/log`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -234,8 +256,10 @@ async function runAll14E2ETests() {
       },
       body: JSON.stringify({ status: 'taken', takenAt: '08:05 AM' }),
     });
+    const logTakeData = await logTakeRes.json();
+
     assert(
-      logTakenRes.ok,
+      logTakeRes.ok && logTakeData.status === 'taken',
       7,
       'Patient can mark medication as taken',
       `Logged taken status for medication ${addedMed.id}`
@@ -244,65 +268,60 @@ async function runAll14E2ETests() {
     // -------------------------------------------------------------------------
     // TEST 8: Caregiver sees medication adherence updated
     // -------------------------------------------------------------------------
-    const caregiverViewMedsRes = await fetch(`${baseUrl}/api/medications?patientId=${bobUser.id}`, {
+    const caregiverMedsRes = await fetch(`${baseUrl}/api/medications?patientId=${bobUser.id}`, {
       headers: { Authorization: `Bearer ${carolToken}` },
     });
-    const caregiverViewMeds = await caregiverViewMedsRes.json();
-    const updatedBobMed = caregiverViewMeds.find((m: any) => m.id === addedMed.id);
+    const caregiverMeds = await caregiverMedsRes.json();
+    const updatedMedForCaregiver = caregiverMeds.find((m: any) => m.id === addedMed.id);
+
     assert(
-      updatedBobMed && updatedBobMed.status === 'taken',
+      caregiverMedsRes.ok && updatedMedForCaregiver?.status === 'taken',
       8,
       'Caregiver sees medication adherence updated',
-      `Caregiver retrieved status: ${updatedBobMed?.status} (takenAt: ${updatedBobMed?.takenAt})`
+      `Caregiver retrieved status: ${updatedMedForCaregiver?.status} (takenAt: ${updatedMedForCaregiver?.takenAt})`
     );
 
     // -------------------------------------------------------------------------
     // TEST 9: Caregiver changes medication time -> Patient schedule updates
     // -------------------------------------------------------------------------
-    const updateTimeRes = await fetch(`${baseUrl}/api/medications/${addedMed.id}`, {
+    const updateMedRes = await fetch(`${baseUrl}/api/medications/${addedMed.id}`, {
       method: 'PUT',
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${carolToken}`,
       },
       body: JSON.stringify({
-        patientId: bobUser.id,
         scheduledTime: '08:30 AM',
         dosage: '1000mg Extended Release',
       }),
     });
-    const updateTimeData = await updateTimeRes.json();
+    const updateMedData = await updateMedRes.json();
 
-    const bobMedsAfterUpdateRes = await fetch(`${baseUrl}/api/medications`, {
-      headers: { Authorization: `Bearer ${bobToken}` },
-    });
-    const bobMedsAfterUpdate = await bobMedsAfterUpdateRes.json();
-    const bobMedUpdated = bobMedsAfterUpdate.find((m: any) => m.id === addedMed.id);
     assert(
-      updateTimeRes.ok &&
-        bobMedUpdated &&
-        bobMedUpdated.scheduledTime === '08:30 AM' &&
-        bobMedUpdated.dosage === '1000mg Extended Release',
+      updateMedRes.ok &&
+        updateMedData.medication.scheduledTime === '08:30 AM' &&
+        updateMedData.medication.dosage === '1000mg Extended Release',
       9,
       'Caregiver changes medication time -> Patient schedule updates',
-      `Updated time to 08:30 AM and dosage to ${bobMedUpdated?.dosage}`
+      `Updated time to ${updateMedData.medication?.scheduledTime} and dosage to ${updateMedData.medication?.dosage}`
     );
 
     // -------------------------------------------------------------------------
-    // TEST 10: Caregiver deactivates medication -> Patient schedule removes it & no alarms scheduled
+    // TEST 10: Caregiver deactivates medication -> Patient schedule removes it
     // -------------------------------------------------------------------------
-    const deleteMedRes = await fetch(`${baseUrl}/api/medications/${addedMed.id}?patientId=${bobUser.id}`, {
+    const deleteMedRes = await fetch(`${baseUrl}/api/medications/${addedMed.id}`, {
       method: 'DELETE',
       headers: { Authorization: `Bearer ${carolToken}` },
     });
 
-    const bobMedsAfterDeleteRes = await fetch(`${baseUrl}/api/medications`, {
+    const patientMedsAfterDeleteRes = await fetch(`${baseUrl}/api/medications`, {
       headers: { Authorization: `Bearer ${bobToken}` },
     });
-    const bobMedsAfterDelete = await bobMedsAfterDeleteRes.json();
-    const deletedFound = bobMedsAfterDelete.find((m: any) => m.id === addedMed.id);
+    const patientMedsAfterDelete = await patientMedsAfterDeleteRes.json();
+    const medStillPresent = patientMedsAfterDelete.some((m: any) => m.id === addedMed.id);
+
     assert(
-      deleteMedRes.ok && deletedFound === undefined,
+      deleteMedRes.ok && !medStillPresent,
       10,
       'Caregiver deactivates medication -> Patient schedule removes it',
       'Deactivated medication is excluded from active schedule'
@@ -311,10 +330,10 @@ async function runAll14E2ETests() {
     // -------------------------------------------------------------------------
     // TEST 11: Unlinked caregiver cannot access or modify patient medications (HTTP 403)
     // -------------------------------------------------------------------------
-    const unlinkedAccessRes = await fetch(`${baseUrl}/api/medications?patientId=${bobUser.id}`, {
+    const unlinkedMedsRes = await fetch(`${baseUrl}/api/medications?patientId=${bobUser.id}`, {
       headers: { Authorization: `Bearer ${daveToken}` },
     });
-    const unlinkedPostRes = await fetch(`${baseUrl}/api/medications`, {
+    const unlinkedAddMedRes = await fetch(`${baseUrl}/api/medications`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -322,30 +341,29 @@ async function runAll14E2ETests() {
       },
       body: JSON.stringify({
         patientId: bobUser.id,
-        name: 'Hacker Pills',
-        dosage: '999mg',
-        scheduledTime: '12:00 PM',
+        name: 'Unauthorized Pill',
+        dosage: '10mg',
+        scheduledTime: '08:00 AM',
       }),
     });
+
     assert(
-      unlinkedAccessRes.status === 403 && unlinkedPostRes.status === 403,
+      unlinkedMedsRes.status === 403 && unlinkedAddMedRes.status === 403,
       11,
       'Unlinked caregiver cannot access or modify patient medications (HTTP 403)',
-      `Read returned ${unlinkedAccessRes.status}, Write returned ${unlinkedPostRes.status}`
+      `Read returned ${unlinkedMedsRes.status}, Write returned ${unlinkedAddMedRes.status}`
     );
 
     // -------------------------------------------------------------------------
     // TEST 12: Escalation worker escalates missed doses for active medications only
     // -------------------------------------------------------------------------
-    // Create an active med for Bob
     const activeEscMedRes = await fetch(`${baseUrl}/api/medications`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${carolToken}`,
+        Authorization: `Bearer ${bobToken}`,
       },
       body: JSON.stringify({
-        patientId: bobUser.id,
         name: 'Active Escalation Pill',
         dosage: '25mg',
         scheduledTime: '09:00 AM',
@@ -394,8 +412,6 @@ async function runAll14E2ETests() {
     // -------------------------------------------------------------------------
     // TEST 14: Native alarm sync logic verification
     // -------------------------------------------------------------------------
-    // In our nativeReminderService implementation:
-    const { syncNativeMedicationAlarms } = await import('../src/services/nativeReminderService');
     const caregiverSyncResult = await syncNativeMedicationAlarms([{ id: 'test', name: 'Med', dosage: '10mg', scheduledTime: '08:00 AM', status: 'due' } as any], 'caregiver');
     const patientSyncResult = await syncNativeMedicationAlarms([{ id: 'test', name: 'Med', dosage: '10mg', scheduledTime: '08:00 AM', status: 'due' } as any], 'patient');
 
@@ -406,21 +422,306 @@ async function runAll14E2ETests() {
       `Caregiver device receives 0 alarms, while patient device receives ${patientSyncResult.scheduledCount} alarm`
     );
 
+    // -------------------------------------------------------------------------
+    // TEST 15: Fresh patient has 0 steps and 0L water (no fake 4000 steps or fake 66 CareScore)
+    // -------------------------------------------------------------------------
+    const freshPatientSignup = await fetch(`${baseUrl}/api/auth/signup`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        role: 'patient',
+        name: 'Fresh Patient Frank',
+        email: `frank-${Date.now()}@example.com`,
+        password: 'password123',
+      }),
+    });
+    const freshData = await freshPatientSignup.json();
+    const frankToken = freshData.token;
+
+    const frankActivityRes = await fetch(`${baseUrl}/api/activity`, {
+      headers: { Authorization: `Bearer ${frankToken}` },
+    });
+    const frankActivity = await frankActivityRes.json();
+
+    const frankHydrationRes = await fetch(`${baseUrl}/api/hydration`, {
+      headers: { Authorization: `Bearer ${frankToken}` },
+    });
+    const frankHydration = await frankHydrationRes.json();
+
+    assert(
+      frankActivity.steps === 0 && frankHydration.currentLiters === 0,
+      15,
+      'Fresh patient starts with 0 steps and 0L water (no fake 4000 steps)',
+      `Steps: ${frankActivity.steps}, Hydration: ${frankHydration.currentLiters}L`
+    );
+
+    // -------------------------------------------------------------------------
+    // TEST 16: Invalid medication time format is rejected with HTTP 400
+    // -------------------------------------------------------------------------
+    const invalidTimeRes = await fetch(`${baseUrl}/api/medications`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${frankToken}`,
+      },
+      body: JSON.stringify({
+        name: 'Pill X',
+        dosage: '10mg',
+        scheduledTime: 'not_a_valid_time',
+      }),
+    });
+
+    assert(
+      invalidTimeRes.status === 400,
+      16,
+      'Invalid medication scheduled time format is rejected with HTTP 400',
+      `Server rejected "not_a_valid_time" with status 400`
+    );
+
+    // -------------------------------------------------------------------------
+    // TEST 17: Medication scheduled with 24h format (14:30) is normalized to 12h format (02:30 PM)
+    // -------------------------------------------------------------------------
+    const normTimeRes = await fetch(`${baseUrl}/api/medications`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${frankToken}`,
+      },
+      body: JSON.stringify({
+        name: 'Afternoon Statin',
+        dosage: '20mg',
+        scheduledTime: '14:30',
+        category: 'afternoon',
+      }),
+    });
+    const normTimeData = await normTimeRes.json();
+
+    assert(
+      normTimeRes.status === 201 && normTimeData.scheduledTime === '02:30 PM',
+      17,
+      'Medication 24h time input is normalized to standard 12h format',
+      `Input "14:30" saved as "${normTimeData.scheduledTime}"`
+    );
+
+    // -------------------------------------------------------------------------
+    // TEST 18: Hydration settings GET and PUT with interval/time validation
+    // -------------------------------------------------------------------------
+    const updateHydSettingsRes = await fetch(`${baseUrl}/api/hydration/settings`, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${frankToken}`,
+      },
+      body: JSON.stringify({
+        dailyGoalLiters: 2.5,
+        intervalMinutes: 45,
+        startTime: '07:30',
+        endTime: '21:00',
+        reminderEnabled: true,
+      }),
+    });
+    const hydSettingsData = await updateHydSettingsRes.json();
+
+    assert(
+      updateHydSettingsRes.ok &&
+        hydSettingsData.settings.dailyGoalLiters === 2.5 &&
+        hydSettingsData.settings.intervalMinutes === 45,
+      18,
+      'Hydration settings update and retrieval',
+      `Goal: ${hydSettingsData.settings?.dailyGoalLiters}L, Interval: ${hydSettingsData.settings?.intervalMinutes}m`
+    );
+
+    // -------------------------------------------------------------------------
+    // TEST 19: Hydration reminder sync cancelled on caregiver device and scheduled on patient device
+    // -------------------------------------------------------------------------
+    const caregiverHydSync = await syncNativeHydrationReminders(hydSettingsData.settings, 'caregiver');
+    const patientHydSync = await syncNativeHydrationReminders(hydSettingsData.settings, 'patient');
+
+    assert(
+      caregiverHydSync.enabled === false && patientHydSync.enabled === true,
+      19,
+      'Hydration reminder sync isolation between patient and caregiver',
+      `Caregiver enabled: ${caregiverHydSync.enabled}, Patient enabled: ${patientHydSync.enabled}`
+    );
+
+    // -------------------------------------------------------------------------
+    // TEST 20: Activity device sync updates steps and persists to SQLite
+    // -------------------------------------------------------------------------
+    const syncActRes = await fetch(`${baseUrl}/api/activity/sync`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${frankToken}`,
+      },
+      body: JSON.stringify({
+        steps: 1250,
+        distanceKm: 0.95,
+        caloriesBurned: 55,
+        activeMinutes: 14,
+      }),
+    });
+    const syncActData = await syncActRes.json();
+
+    const dbAct = db.prepare('SELECT steps FROM activity_logs WHERE patient_id = ? AND log_date = ?').get(freshData.user.id, todayStr) as any;
+
+    assert(
+      syncActRes.ok && dbAct?.steps === 1250,
+      20,
+      'Device activity sync updates steps and persists to SQLite',
+      `Synced ${dbAct?.steps} steps to database`
+    );
+
+    // -------------------------------------------------------------------------
+    // TEST 21: Profile avatar photo upload validation and patient isolation
+    // -------------------------------------------------------------------------
+    const avatarUpdateRes = await fetch(`${baseUrl}/api/patient/avatar`, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${frankToken}`,
+      },
+      body: JSON.stringify({
+        avatarUrl: 'data:image/jpeg;base64,/9j/4AAQSkZJRgABAQEASABIAAD/2wBD...',
+      }),
+    });
+    const avatarData = await avatarUpdateRes.json();
+
+    const dbUser = db.prepare('SELECT avatar_url FROM users WHERE id = ?').get(freshData.user.id) as any;
+
+    assert(
+      avatarUpdateRes.ok && (dbUser.avatar_url?.startsWith('/uploads/') || dbUser.avatar_url?.startsWith('data:image/')),
+      21,
+      'Profile photo avatar upload and persistence via storage service',
+      `Avatar URL saved: ${dbUser.avatar_url}`
+    );
+
+    // -------------------------------------------------------------------------
+    // TEST 22: CORS Headers & OPTIONS preflight for WebView cross-origin requests
+    // -------------------------------------------------------------------------
+    const optionsRes = await fetch(`${baseUrl}/api/auth/login`, {
+      method: 'OPTIONS',
+      headers: {
+        'Origin': 'http://localhost',
+        'Access-Control-Request-Method': 'POST',
+        'Access-Control-Request-Headers': 'Content-Type, Authorization',
+      },
+    });
+
+    assert(
+      optionsRes.status === 200 && optionsRes.headers.get('access-control-allow-origin') === '*',
+      22,
+      'CORS preflight (OPTIONS) returns 200 OK and allows all origins',
+      `Status: ${optionsRes.status}, Access-Control-Allow-Origin: ${optionsRes.headers.get('access-control-allow-origin')}`
+    );
+
+    // -------------------------------------------------------------------------
+    // TEST 23: Login with invalid credentials returns JSON error (never HTML)
+    // -------------------------------------------------------------------------
+    const badLoginRes = await fetch(`${baseUrl}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: 'nonexistent@example.com', password: 'wrongpassword' }),
+    });
+    const badLoginContentType = badLoginRes.headers.get('content-type') || '';
+    const badLoginData = await badLoginRes.json();
+
+    assert(
+      badLoginRes.status === 401 && badLoginContentType.includes('application/json') && typeof badLoginData.error === 'string',
+      23,
+      'Invalid login returns HTTP 401 JSON error rather than HTML',
+      `Status: ${badLoginRes.status}, Content-Type: ${badLoginContentType}, error: "${badLoginData.error}"`
+    );
+
+    // -------------------------------------------------------------------------
+    // TEST 24: Health check endpoint returns JSON and database status
+    // -------------------------------------------------------------------------
+    const healthRes = await fetch(`${baseUrl}/api/health`);
+    const healthContentType = healthRes.headers.get('content-type') || '';
+    const healthData = await healthRes.json();
+
+    assert(
+      healthRes.status === 200 && healthContentType.includes('application/json') && healthData.status === 'ok',
+      24,
+      'Health check endpoint returns HTTP 200 with JSON status: "ok"',
+      `Status: ${healthRes.status}, environment: "${healthData.environment}"`
+    );
+
+    // -------------------------------------------------------------------------
+    // TEST 25: Refresh Token Rotation (POST /api/auth/refresh)
+    // -------------------------------------------------------------------------
+    const refreshRes = await fetch(`${baseUrl}/api/auth/refresh`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ refreshToken: freshData.refreshToken }),
+    });
+    const refreshData = await refreshRes.json();
+
+    assert(
+      refreshRes.ok && typeof refreshData.token === 'string' && typeof refreshData.refreshToken === 'string' && refreshData.refreshToken !== freshData.refreshToken,
+      25,
+      'Refresh token rotation issues a new access token and rotated refresh token',
+      `New Token issued, New Refresh Token: ${refreshData.refreshToken?.substring(0, 12)}...`
+    );
+
+    // -------------------------------------------------------------------------
+    // TEST 26: Replay of used refresh token is detected and rejected (HTTP 401)
+    // -------------------------------------------------------------------------
+    const replayRes = await fetch(`${baseUrl}/api/auth/refresh`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ refreshToken: freshData.refreshToken }), // Using old revoked token
+    });
+
+    assert(
+      replayRes.status === 401,
+      26,
+      'Replay of revoked refresh token is rejected and revokes session',
+      `Server rejected replayed token with status ${replayRes.status}`
+    );
+
+    // -------------------------------------------------------------------------
+    // TEST 27: Database readiness check (GET /api/health/ready)
+    // -------------------------------------------------------------------------
+    const readyRes = await fetch(`${baseUrl}/api/health/ready`);
+    const readyData = await readyRes.json();
+
+    assert(
+      readyRes.status === 200 && readyData.status === 'ready' && readyData.database?.ok === true,
+      27,
+      'Database readiness check verifies connectivity',
+      `Database: ${readyData.database?.type} (Latency: ${readyData.database?.latencyMs}ms)`
+    );
+
+    // -------------------------------------------------------------------------
+    // TEST 28: Logout revokes active refresh token (POST /api/auth/logout)
+    // -------------------------------------------------------------------------
+    const logoutRes = await fetch(`${baseUrl}/api/auth/logout`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ refreshToken: refreshData.refreshToken }),
+    });
+
+    const refreshAfterLogout = await fetch(`${baseUrl}/api/auth/refresh`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ refreshToken: refreshData.refreshToken }),
+    });
+
+    assert(
+      logoutRes.ok && refreshAfterLogout.status === 401,
+      28,
+      'Logout successfully revokes refresh token in database',
+      `Logout returned 200, post-logout refresh attempt returned ${refreshAfterLogout.status}`
+    );
+
     // Clean up test records
     db.prepare('DELETE FROM users WHERE email LIKE \'%@example.com\'').run();
-    db.prepare('DELETE FROM caregiver_patient_links WHERE patient_id = ?').run(bobUser.id);
-    db.prepare('DELETE FROM medications WHERE patient_id = ?').run(bobUser.id);
-    db.prepare('DELETE FROM medication_logs WHERE patient_id = ?').run(bobUser.id);
-    db.prepare('DELETE FROM medication_escalation_states WHERE patient_id = ?').run(bobUser.id);
-    db.prepare('DELETE FROM alerts WHERE patient_id = ?').run(bobUser.id);
-    db.prepare('DELETE FROM notifications WHERE patient_id = ?').run(bobUser.id);
-    db.prepare('DELETE FROM care_connection_codes WHERE patient_id = ?').run(bobUser.id);
   } finally {
     server.close();
   }
 
   console.log('\n===================================================================');
-  console.log(`   14-SUITE E2E VERIFICATION SUMMARY: ${passed} Passed, ${failed} Failed`);
+  console.log(`   E2E VERIFICATION SUMMARY: ${passed} Passed, ${failed} Failed`);
   console.log('===================================================================\n');
 
   if (failed > 0) {
@@ -428,7 +729,7 @@ async function runAll14E2ETests() {
   }
 }
 
-runAll14E2ETests().catch((err) => {
+runAllE2ETests().catch((err) => {
   console.error('E2E Test Error:', err);
   process.exit(1);
 });

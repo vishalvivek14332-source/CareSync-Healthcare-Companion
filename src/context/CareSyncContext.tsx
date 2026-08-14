@@ -5,6 +5,7 @@ import {
   CaregiverTab,
   Medication,
   HydrationState,
+  HydrationSettings,
   ActivityState,
   RoutineItem,
   CareScoreBreakdown,
@@ -15,14 +16,18 @@ import {
   UserProfile,
   ChatMessage,
   ConnectionCodeInfo,
+  SyncStatus,
 } from '../types';
 import {
   signupApi,
   loginApi,
+  logoutApi,
   fetchCurrentUserApi,
   switchDemoUserApi,
   setAuthToken,
   getAuthToken,
+  clearAuthTokens,
+  flushOfflineQueue,
   fetchConnectionCodeApi,
   generateConnectionCodeApi,
   revokeConnectionCodeApi,
@@ -32,9 +37,13 @@ import {
   deleteMedicationApi,
   logMedicationDoseApi,
   fetchHydrationApi,
+  fetchHydrationSettingsApi,
+  updateHydrationSettingsApi,
   logHydrationApi,
   fetchActivityApi,
+  syncActivityApi,
   recordActivitySessionApi,
+  updateProfilePhotoApi,
   fetchLinkedPatientsApi,
   linkPatientApi,
   fetchAlertsApi,
@@ -47,6 +56,7 @@ import {
 import {
   initNativeNotifications,
   syncNativeMedicationAlarms,
+  syncNativeHydrationReminders,
 } from '../services/nativeReminderService';
 
 interface ToastInfo {
@@ -92,10 +102,15 @@ interface CareSyncContextType {
   assistantOpen: boolean;
   setAssistantOpen: (val: boolean) => void;
 
+  // Sync & Network Status
+  syncStatus: SyncStatus;
+  triggerManualSync: () => Promise<void>;
+
   // Core Data States
   patient: UserProfile;
   medications: Medication[];
   hydration: HydrationState;
+  hydrationSettings: HydrationSettings;
   activity: ActivityState;
   routineItems: RoutineItem[];
   careScore: CareScoreBreakdown;
@@ -118,8 +133,11 @@ interface CareSyncContextType {
   updateMedicationSchedule: (id: string, updates: Partial<Medication>) => Promise<void>;
   deleteMedicationSchedule: (id: string) => Promise<void>;
   logWater: (amountMl: number) => void;
+  updateHydrationSettings: (settings: Partial<HydrationSettings>) => Promise<void>;
   startActivitySession: (type: 'walk' | 'jog') => void;
   stopActivitySession: () => void;
+  syncDeviceActivity: (steps: number, distanceKm?: number, caloriesBurned?: number) => Promise<void>;
+  updateProfilePhoto: (avatarUrl: string) => Promise<void>;
   toggleRoutineItem: (id: string) => void;
   markAlertReviewed: (id: string) => void;
   sendSOS: (reason?: string) => void;
@@ -133,168 +151,68 @@ interface CareSyncContextType {
 const CareSyncContext = createContext<CareSyncContextType | undefined>(undefined);
 
 const defaultPatientProfile: UserProfile = {
-  id: 'p-1',
+  id: '',
   role: 'patient',
-  name: 'Alex Johnson',
-  age: 72,
-  avatarUrl: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=250',
-  primaryCaregiver: 'Sarah Johnson',
-  caregiverPhone: '(555) 019-2831',
-  emergencyContact: 'Sarah Johnson (Daughter)',
-  emergencyPhone: '(555) 019-2831',
+  name: 'Patient',
+  age: undefined,
+  avatarUrl: undefined,
+  primaryCaregiver: undefined,
+  caregiverPhone: undefined,
+  emergencyContact: undefined,
+  emergencyPhone: undefined,
   quietHours: '10:00 PM - 7:00 AM',
-  medicationCount: 3,
+  medicationCount: 0,
   lastActive: 'Just now',
   status: 'normal',
 };
 
-const initialMedications: Medication[] = [
-  {
-    id: 'med-1',
-    name: 'Morning Medication',
-    dosage: 'Vitamin D3 (2,000 IU) + Lisinopril 10mg',
-    scheduledTime: '08:00 AM',
-    instructions: 'Take with full glass of water after breakfast',
-    status: 'taken',
-    takenAt: '08:02 AM',
-    category: 'morning',
-    color: 'bg-emerald-50 text-emerald-700 border-emerald-200',
-  },
-  {
-    id: 'med-2',
-    name: 'Afternoon Medication',
-    dosage: 'Calcium Citrate 500mg',
-    scheduledTime: '01:00 PM',
-    instructions: 'Take 1 tablet with light snack',
-    status: 'due',
-    category: 'afternoon',
-    color: 'bg-amber-50 text-amber-800 border-amber-200',
-  },
-  {
-    id: 'med-3',
-    name: 'Evening Medication',
-    dosage: 'Atorvastatin 20mg + Multivitamin',
-    scheduledTime: '08:00 PM',
-    instructions: 'Take before bed with water',
-    status: 'upcoming',
-    category: 'evening',
-    color: 'bg-indigo-50 text-indigo-700 border-indigo-200',
-  },
-];
+const defaultHydrationSettings: HydrationSettings = {
+  dailyGoalLiters: 2.0,
+  reminderEnabled: true,
+  startTime: '08:00',
+  endTime: '20:00',
+  intervalMinutes: 60,
+};
 
 const initialHydration: HydrationState = {
-  currentLiters: 1.4,
+  currentLiters: 0,
   goalLiters: 2.0,
-  nextReminderTime: 'In 45 minutes',
-  logs: [
-    { id: 'h-1', amountMl: 250, timestamp: '08:15 AM' },
-    { id: 'h-2', amountMl: 400, timestamp: '10:30 AM' },
-    { id: 'h-3', amountMl: 250, timestamp: '12:15 PM' },
-    { id: 'h-4', amountMl: 500, timestamp: '02:00 PM' },
-  ],
-  hourlyTrends: [
-    { hour: '8 AM', liters: 0.25 },
-    { hour: '10 AM', liters: 0.65 },
-    { hour: '12 PM', liters: 0.9 },
-    { hour: '2 PM', liters: 1.4 },
-    { hour: '4 PM', liters: 1.4 },
-    { hour: '6 PM', liters: 1.4 },
-  ],
+  nextReminderTime: 'Every 60 mins (08:00 - 20:00)',
+  logs: [],
+  hourlyTrends: [],
+  settings: defaultHydrationSettings,
 };
 
 const initialActivity: ActivityState = {
-  steps: 4821,
+  steps: 0,
   stepGoal: 5000,
-  activeMinutes: 32,
+  activeMinutes: 0,
   activeMinutesGoal: 30,
-  caloriesBurned: 185,
-  distanceKm: 3.2,
+  caloriesBurned: 0,
+  distanceKm: 0,
   isTrackingActive: false,
-  weeklySteps: [
-    { day: 'Mon', steps: 5120, goal: 5000 },
-    { day: 'Tue', steps: 4900, goal: 5000 },
-    { day: 'Wed', steps: 5400, goal: 5000 },
-    { day: 'Thu', steps: 4821, goal: 5000 },
-    { day: 'Fri', steps: 3900, goal: 5000 },
-    { day: 'Sat', steps: 4200, goal: 5000 },
-    { day: 'Sun', steps: 4600, goal: 5000 },
-  ],
+  hasRecordedActivityToday: false,
+  weeklySteps: [],
 };
-
-const initialRoutineItems: RoutineItem[] = [
-  { id: 'r-1', title: 'Morning medication', time: '8:00 AM', completed: true, category: 'medication', iconName: 'Pill' },
-  { id: 'r-2', title: 'Healthy Breakfast', time: '8:30 AM', completed: true, category: 'wellness', iconName: 'Utensils' },
-  { id: 'r-3', title: 'Hydration goal (1.4L achieved)', time: '10:00 AM', completed: true, category: 'hydration', iconName: 'Droplet' },
-  { id: 'r-4', title: 'Morning 20-min Walk', time: '10:30 AM', completed: true, category: 'activity', iconName: 'Footprints' },
-  { id: 'r-5', title: 'Afternoon medication', time: '1:00 PM', completed: false, category: 'medication', iconName: 'Pill' },
-  { id: 'r-6', title: 'Evening medication', time: '8:00 PM', completed: false, category: 'medication', iconName: 'Pill' },
-  { id: 'r-7', title: 'Gentle Sleep Routine', time: '10:00 PM', completed: false, category: 'wellness', iconName: 'Moon' },
-];
-
-const initialAlerts: AlertItem[] = [
-  {
-    id: 'alt-1',
-    patientId: 'p-1',
-    patientName: 'Alex Johnson',
-    type: 'medication_reminder',
-    severity: 'medium',
-    title: 'Medication Reminder',
-    description: 'Evening medication has not been confirmed yet.',
-    timestamp: 'Yesterday at 8:45 PM',
-    reviewed: false,
-    actionText: 'Send Gentle Reminder',
-  },
-  {
-    id: 'alt-2',
-    patientId: 'p-1',
-    patientName: 'Alex Johnson',
-    type: 'missed_medication',
-    severity: 'high',
-    title: 'Missed Medication Alert',
-    description: 'Evening medication was not confirmed after 3 repeated reminders.',
-    timestamp: '2 days ago',
-    reviewed: false,
-    actionText: 'Contact Alex',
-  },
-  {
-    id: 'alt-3',
-    patientId: 'p-1',
-    patientName: 'Alex Johnson',
-    type: 'routine_insight',
-    severity: 'low',
-    title: 'Routine Pattern Observation',
-    description: 'Walking activity has been slightly lower than average for the last 3 days.',
-    timestamp: '3 days ago',
-    reviewed: true,
-    actionText: 'View Activity Graph',
-  },
-];
 
 const initialEscalationRules: EscalationRules = {
   levels: [
-    { level: 1, title: 'Level 1: Soft Patient Reminder', target: 'Alex (Patient App)', delayMinutes: 0, description: 'Display gentle visual chime & push notification on patient device.', enabled: true },
-    { level: 2, title: 'Level 2: Repeated Reminder Tone', target: 'Alex (Patient App)', delayMinutes: 15, description: 'Play audible tone & show full-screen gentle banner.', enabled: true },
-    { level: 3, title: 'Level 3: Trusted Caregiver Alert', target: 'Sarah Johnson (Caregiver)', delayMinutes: 45, description: 'Send high-priority SMS & notification to trusted caregiver Sarah.', enabled: true },
+    { level: 1, title: 'Level 1: Soft Patient Reminder', target: 'Patient App', delayMinutes: 0, description: 'Display gentle visual chime & push notification on patient device.', enabled: true },
+    { level: 2, title: 'Level 2: Repeated Reminder Tone', target: 'Patient App', delayMinutes: 15, description: 'Play audible tone & show full-screen gentle banner.', enabled: true },
+    { level: 3, title: 'Level 3: Trusted Caregiver Alert', target: 'Caregiver', delayMinutes: 45, description: 'Send high-priority SMS & notification to trusted caregiver.', enabled: true },
     { level: 4, title: 'Level 4: Emergency Escalation Workflow', target: 'Emergency Contacts', delayMinutes: 90, description: 'Trigger priority audio call to designated emergency contact.', enabled: true },
   ],
-  caregiverName: 'Sarah Johnson',
-  caregiverPhone: '(555) 019-2831',
-  caregiverEmail: 'sarah.johnson@example.com',
-  emergencyContactName: 'Sarah Johnson (Daughter)',
-  emergencyContactPhone: '(555) 019-2831',
-  emergencyContactRelation: 'Daughter & Primary Caregiver',
+  caregiverName: '',
+  caregiverPhone: '',
+  caregiverEmail: '',
+  emergencyContactName: '',
+  emergencyContactPhone: '',
+  emergencyContactRelation: '',
   quietHoursStart: '22:00',
   quietHoursEnd: '07:00',
   maxRemindersBeforeEscalation: 3,
   repeatReminderIntervalMinutes: 15,
 };
-
-const initialNotifications: NotificationItem[] = [
-  { id: 'n-1', title: 'Morning Medication Logged', description: 'Vitamin D + Lisinopril confirmed at 8:02 AM', timestamp: '8:02 AM', type: 'reminder', read: false },
-  { id: 'n-2', title: 'Hydration Target Reached (70%)', description: '1.4 L logged. 600 ml remaining today.', timestamp: '2:00 PM', type: 'reminder', read: false },
-  { id: 'n-3', title: 'Walking Milestone!', description: 'You achieved 32 active minutes today!', timestamp: '11:00 AM', type: 'reminder', read: true },
-  { id: 'n-4', title: 'Caregiver Check-in Synchronized', description: 'Sarah reviewed your daily CareScore (86/100).', timestamp: 'Yesterday', type: 'caregiver', read: true },
-];
 
 export const CareSyncProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
   // Auth state
@@ -313,25 +231,29 @@ export const CareSyncProvider: React.FC<{ children: ReactNode }> = ({ children }
 
   // Core Data
   const [patient, setPatient] = useState<UserProfile>(defaultPatientProfile);
-  const [medications, setMedications] = useState<Medication[]>(initialMedications);
+  const [medications, setMedications] = useState<Medication[]>([]);
   const [hydration, setHydration] = useState<HydrationState>(initialHydration);
+  const [hydrationSettings, setHydrationSettings] = useState<HydrationSettings>(defaultHydrationSettings);
   const [activity, setActivity] = useState<ActivityState>(initialActivity);
-  const [routineItems, setRoutineItems] = useState<RoutineItem[]>(initialRoutineItems);
-  const [alerts, setAlerts] = useState<AlertItem[]>(initialAlerts);
+  const [routineItems, setRoutineItems] = useState<RoutineItem[]>([]);
+  const [alerts, setAlerts] = useState<AlertItem[]>([]);
   const [escalationRules, setEscalationRules] = useState<EscalationRules>(initialEscalationRules);
-  const [notifications, setNotifications] = useState<NotificationItem[]>(initialNotifications);
+  const [notifications, setNotifications] = useState<NotificationItem[]>([]);
   const [toasts, setToasts] = useState<ToastInfo[]>([]);
 
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([
     {
       id: 'c-1',
       sender: 'assistant',
-      text: "Good morning! You're on track with your health routines.",
-      timestamp: '08:30 AM',
-      suggestedActions: ['What do I need to do?', 'Log medicine', 'Log water', 'Start a walk'],
+      text: "Hello! I am your CareSync assistant. How can I help you today?",
+      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      suggestedActions: ['What is my schedule?', 'Log water (+250ml)', 'Start a walk'],
     },
   ]);
   const [isAssistantThinking, setIsAssistantThinking] = useState<boolean>(false);
+  const [syncStatus, setSyncStatus] = useState<SyncStatus>(
+    typeof navigator !== 'undefined' && !navigator.onLine ? 'OFFLINE' : 'ONLINE'
+  );
 
   const activeRole: UserRole = currentUser?.role || 'patient';
   const isAuthenticated = !!currentUser && !!getAuthToken();
@@ -352,31 +274,41 @@ export const CareSyncProvider: React.FC<{ children: ReactNode }> = ({ children }
   const loadDataForSession = useCallback(async (user: UserProfile, targetPatientId?: string) => {
     try {
       if (user.role === 'patient') {
-        const medsData = await fetchMedicationsApi();
+        setPatient(user);
+
+        const [medsData, hydrationData, activityData, alertsData, escalationData, codeData] = await Promise.all([
+          fetchMedicationsApi().catch(() => []),
+          fetchHydrationApi().catch(() => null),
+          fetchActivityApi().catch(() => null),
+          fetchAlertsApi().catch(() => []),
+          fetchEscalationRulesApi().catch(() => null),
+          fetchConnectionCodeApi().catch(() => null),
+        ]);
+
         if (medsData) {
           setMedications(medsData);
-          syncNativeMedicationAlarms(medsData, 'patient').catch(console.error);
+          syncNativeMedicationAlarms(medsData, 'patient');
         }
 
-        const hydrationData = await fetchHydrationApi();
-        if (hydrationData) setHydration(hydrationData);
+        if (hydrationData) {
+          setHydration(hydrationData);
+          if (hydrationData.settings) {
+            setHydrationSettings(hydrationData.settings);
+            syncNativeHydrationReminders(hydrationData.settings, 'patient');
+          }
+        }
 
-        const activityData = await fetchActivityApi();
-        if (activityData) setActivity(activityData);
+        if (activityData) {
+          setActivity(activityData);
+        }
 
-        const alertsData = await fetchAlertsApi();
         if (alertsData) setAlerts(alertsData);
-
-        const escalationData = await fetchEscalationRulesApi();
         if (escalationData) setEscalationRules(escalationData);
-
-        const codeData = await fetchConnectionCodeApi().catch(() => null);
         if (codeData) setConnectionCode(codeData);
-
-        setPatient(user);
       } else if (user.role === 'caregiver') {
         // Cancel any native alarms on caregiver device
         syncNativeMedicationAlarms([], 'caregiver').catch(console.error);
+        syncNativeHydrationReminders(defaultHydrationSettings, 'caregiver').catch(console.error);
 
         const patients = await fetchLinkedPatientsApi().catch(() => []);
         setLinkedPatients(patients);
@@ -388,19 +320,18 @@ export const CareSyncProvider: React.FC<{ children: ReactNode }> = ({ children }
           const targetProfile = patients.find((p) => p.id === activeTarget) || patients[0];
           setPatient(targetProfile);
 
-          const medsData = await fetchMedicationsApi(activeTarget).catch(() => []);
-          setMedications(medsData);
+          const [medsData, hydrationData, activityData, alertsData, escalationData] = await Promise.all([
+            fetchMedicationsApi(activeTarget).catch(() => []),
+            fetchHydrationApi(activeTarget).catch(() => null),
+            fetchActivityApi(activeTarget).catch(() => null),
+            fetchAlertsApi(activeTarget).catch(() => []),
+            fetchEscalationRulesApi(activeTarget).catch(() => null),
+          ]);
 
-          const hydrationData = await fetchHydrationApi(activeTarget).catch(() => null);
+          setMedications(medsData || []);
           if (hydrationData) setHydration(hydrationData);
-
-          const activityData = await fetchActivityApi(activeTarget).catch(() => null);
           if (activityData) setActivity(activityData);
-
-          const alertsData = await fetchAlertsApi(activeTarget).catch(() => []);
-          setAlerts(alertsData);
-
-          const escalationData = await fetchEscalationRulesApi(activeTarget).catch(() => null);
+          setAlerts(alertsData || []);
           if (escalationData) setEscalationRules(escalationData);
         } else {
           setMedications([]);
@@ -412,7 +343,23 @@ export const CareSyncProvider: React.FC<{ children: ReactNode }> = ({ children }
     }
   }, []);
 
-  // Restore authenticated session on initial mount
+  const triggerManualSync = useCallback(async () => {
+    setSyncStatus('SYNCING');
+    try {
+      const { syncedCount } = await flushOfflineQueue();
+      if (currentUser) {
+        await loadDataForSession(currentUser);
+      }
+      setSyncStatus('ONLINE');
+      if (syncedCount > 0) {
+        addToast(`Synchronized ${syncedCount} offline record(s)`, 'success');
+      }
+    } catch {
+      setSyncStatus(typeof navigator !== 'undefined' && !navigator.onLine ? 'OFFLINE' : 'ONLINE');
+    }
+  }, [currentUser, loadDataForSession, addToast]);
+
+  // Restore authenticated session & listen to network events
   useEffect(() => {
     initNativeNotifications((medId) => {
       fetchMedicationsApi().then((meds) => {
@@ -438,7 +385,31 @@ export const CareSyncProvider: React.FC<{ children: ReactNode }> = ({ children }
           setCurrentUser(null);
         });
     }
-  }, [loadDataForSession]);
+
+    const handleOnline = () => {
+      setSyncStatus('SYNCING');
+      flushOfflineQueue()
+        .then(({ syncedCount }) => {
+          setSyncStatus('ONLINE');
+          addToast('Connected! Online synchronization active.', 'success');
+          if (currentUser) loadDataForSession(currentUser);
+        })
+        .catch(() => setSyncStatus('ONLINE'));
+    };
+
+    const handleOffline = () => {
+      setSyncStatus('OFFLINE');
+      addToast('Network offline. Local reminders remain active.', 'warning');
+    };
+
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, [loadDataForSession, currentUser, addToast]);
 
   // Auth Operations
   const login = async (email: string, password: string) => {
@@ -458,17 +429,22 @@ export const CareSyncProvider: React.FC<{ children: ReactNode }> = ({ children }
   };
 
   const logout = () => {
-    setAuthToken(null);
+    logoutApi().catch(console.error);
+    clearAuthTokens();
     setCurrentUser(null);
     setConnectionCode(null);
     setLinkedPatients([]);
     setSelectedPatientId(null);
     setMedications([]);
+    setHydration(initialHydration);
+    setActivity(initialActivity);
+    setRoutineItems([]);
     setAlerts([]);
     setNotifications([]);
     setActivePatientTab('home');
     setActiveCaregiverTab('overview');
     syncNativeMedicationAlarms([], 'caregiver').catch(console.error);
+    syncNativeHydrationReminders(defaultHydrationSettings, 'caregiver').catch(console.error);
     addToast('Logged out successfully.', 'info');
   };
 
@@ -540,45 +516,45 @@ export const CareSyncProvider: React.FC<{ children: ReactNode }> = ({ children }
     try {
       const targetPatient = med.patientId || selectedPatientId || currentUser?.id;
       const createdMed = await createMedicationApi({ ...med, patientId: targetPatient });
-      setMedications((prev) => [...prev, createdMed]);
+      const updatedMeds = [...medications, createdMed];
+      setMedications(updatedMeds);
       addToast(`Added medication schedule for ${createdMed.name}`, 'success');
 
-      // If on patient device, sync local alarms
       if (currentUser?.role === 'patient') {
-        syncNativeMedicationAlarms([...medications, createdMed], 'patient');
+        syncNativeMedicationAlarms(updatedMeds, 'patient');
       }
     } catch (err: any) {
       console.error('Failed to add medication schedule:', err);
       addToast(err.message || 'Failed to add medication schedule', 'error');
+      throw err;
     }
   };
 
   const updateMedicationSchedule = async (id: string, updates: Partial<Medication>) => {
     try {
       const res = await updateMedicationApi(id, updates);
-      setMedications((prev) =>
-        prev.map((m) => (m.id === id ? { ...m, ...updates, ...(res.medication || {}) } : m))
-      );
+      const updatedList = medications.map((m) => (m.id === id ? { ...m, ...updates, ...(res.medication || {}) } : m));
+      setMedications(updatedList);
       addToast('Medication schedule updated successfully', 'success');
 
       if (currentUser?.role === 'patient') {
-        const updatedList = medications.map((m) => (m.id === id ? { ...m, ...updates } : m));
         syncNativeMedicationAlarms(updatedList, 'patient');
       }
     } catch (err: any) {
       console.error('Failed to update medication schedule:', err);
       addToast(err.message || 'Failed to update medication schedule', 'error');
+      throw err;
     }
   };
 
   const deleteMedicationSchedule = async (id: string) => {
     try {
       await deleteMedicationApi(id);
-      setMedications((prev) => prev.filter((m) => m.id !== id));
-      addToast('Medication deactivated / removed', 'info');
+      const filteredList = medications.filter((m) => m.id !== id);
+      setMedications(filteredList);
+      addToast('Medication removed from active schedule', 'info');
 
       if (currentUser?.role === 'patient') {
-        const filteredList = medications.filter((m) => m.id !== id);
         syncNativeMedicationAlarms(filteredList, 'patient');
       }
     } catch (err: any) {
@@ -589,11 +565,14 @@ export const CareSyncProvider: React.FC<{ children: ReactNode }> = ({ children }
 
   const takeMedication = (id: string) => {
     const nowStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-    setMedications((prev) =>
-      prev.map((m) => (m.id === id ? { ...m, status: 'taken', takenAt: nowStr } : m))
-    );
+    const updated = medications.map((m) => (m.id === id ? { ...m, status: 'taken' as const, takenAt: nowStr } : m));
+    setMedications(updated);
 
     logMedicationDoseApi(id, 'taken', nowStr).catch(console.error);
+
+    if (currentUser?.role === 'patient') {
+      syncNativeMedicationAlarms(updated, 'patient');
+    }
 
     setRoutineItems((prev) =>
       prev.map((item) => {
@@ -625,6 +604,7 @@ export const CareSyncProvider: React.FC<{ children: ReactNode }> = ({ children }
     addToast(`Reminder snoozed for ${minutes} minutes`, 'info');
   };
 
+  // Hydration Actions
   const logWater = (amountMl: number) => {
     const newLiters = Number((hydration.currentLiters + amountMl / 1000).toFixed(2));
     const nowStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
@@ -643,6 +623,33 @@ export const CareSyncProvider: React.FC<{ children: ReactNode }> = ({ children }
     }
   };
 
+  const updateHydrationSettings = async (settings: Partial<HydrationSettings>) => {
+    try {
+      const res = await updateHydrationSettingsApi(settings);
+      if (res.success) {
+        setHydrationSettings(res.settings);
+        setHydration((prev) => ({
+          ...prev,
+          goalLiters: res.settings.dailyGoalLiters,
+          settings: res.settings,
+          nextReminderTime: res.settings.reminderEnabled
+            ? `Every ${res.settings.intervalMinutes} mins (${res.settings.startTime} - ${res.settings.endTime})`
+            : 'Reminders Disabled',
+        }));
+
+        if (currentUser?.role === 'patient') {
+          syncNativeHydrationReminders(res.settings, 'patient');
+        }
+        addToast('Hydration reminder schedule saved!', 'success');
+      }
+    } catch (err: any) {
+      console.error('Failed to update hydration settings:', err);
+      addToast(err.message || 'Failed to update hydration settings', 'error');
+      throw err;
+    }
+  };
+
+  // Activity Actions
   const startActivitySession = (type: 'walk' | 'jog') => {
     setActivity((prev) => ({
       ...prev,
@@ -662,6 +669,7 @@ export const CareSyncProvider: React.FC<{ children: ReactNode }> = ({ children }
     setActivity((prev) => ({
       ...prev,
       isTrackingActive: false,
+      hasRecordedActivityToday: true,
       steps: prev.steps + addedSteps,
       activeMinutes: prev.activeMinutes + addedMinutes,
       distanceKm: Number((prev.distanceKm + addedKm).toFixed(1)),
@@ -670,6 +678,39 @@ export const CareSyncProvider: React.FC<{ children: ReactNode }> = ({ children }
 
     recordActivitySessionApi({ addedSteps, addedMinutes, addedKm, addedCalories: 45 }).catch(console.error);
     addToast(`Activity session completed! +${addedSteps} steps added.`, 'success');
+  };
+
+  const syncDeviceActivity = async (steps: number, distanceKm = 0, caloriesBurned = 0, activeMinutes = 0) => {
+    try {
+      const res = await syncActivityApi({ steps, distanceKm, caloriesBurned, activeMinutes: activeMinutes || Math.floor(steps / 100) });
+      if (res.success && res.activity) {
+        setActivity((prev) => ({
+          ...prev,
+          ...res.activity,
+          hasRecordedActivityToday: true,
+        }));
+      }
+    } catch (err) {
+      console.warn('Failed to sync device steps:', err);
+    }
+  };
+
+  // Profile Photo Upload Action
+  const updateProfilePhoto = async (avatarUrl: string) => {
+    try {
+      const res = await updateProfilePhotoApi(avatarUrl);
+      if (res.success) {
+        setPatient((prev) => ({ ...prev, avatarUrl: res.avatarUrl }));
+        if (currentUser) {
+          setCurrentUser((prev) => (prev ? { ...prev, avatarUrl: res.avatarUrl } : null));
+        }
+        addToast('Profile photo updated successfully!', 'success');
+      }
+    } catch (err: any) {
+      console.error('Failed to update avatar:', err);
+      addToast(err.message || 'Failed to update profile photo', 'error');
+      throw err;
+    }
   };
 
   const toggleRoutineItem = (id: string) => {
@@ -711,33 +752,72 @@ export const CareSyncProvider: React.FC<{ children: ReactNode }> = ({ children }
     addToast('Profile settings saved', 'success');
   };
 
+  // Deterministic, real-data weighted CareScore calculation
   const calculateCareScore = (): CareScoreBreakdown => {
-    const medTaken = medications.filter((m) => m.status === 'taken').length;
-    const medTotal = medications.length;
-    const medicationScore = medTotal > 0 ? Math.round((medTaken / medTotal) * 100) : 100;
-    const hydrationScore = Math.min(100, Math.round((hydration.currentLiters / hydration.goalLiters) * 100));
-    const stepScore = Math.min(100, Math.round((activity.steps / activity.stepGoal) * 100));
-    const completedRoutines = routineItems.filter((r) => r.completed).length;
-    const routineScore = routineItems.length > 0 ? Math.round((completedRoutines / routineItems.length) * 100) : 100;
+    let totalWeights = 0;
+    let weightedSum = 0;
 
-    const totalScore = Math.round(
-      medicationScore * 0.35 + hydrationScore * 0.25 + stepScore * 0.2 + routineScore * 0.2
-    );
+    // 1. Medication adherence
+    const medTotal = medications.length;
+    let medicationScore = 100;
+    if (medTotal > 0) {
+      const medTaken = medications.filter((m) => m.status === 'taken').length;
+      medicationScore = Math.round((medTaken / medTotal) * 100);
+      weightedSum += medicationScore * 0.4;
+      totalWeights += 0.4;
+    }
+
+    // 2. Hydration progress
+    const goalLiters = hydration?.goalLiters || 2.0;
+    const currentLiters = hydration?.currentLiters || 0;
+    let hydrationScore = 0;
+    if (goalLiters > 0 && currentLiters > 0) {
+      hydrationScore = Math.min(100, Math.round((currentLiters / goalLiters) * 100));
+      weightedSum += hydrationScore * 0.25;
+      totalWeights += 0.25;
+    } else if (goalLiters > 0 && (medTotal > 0 || (activity?.steps || 0) > 0 || (routineItems?.length || 0) > 0)) {
+      // If user has other active logs today but 0 water, score is 0
+      hydrationScore = 0;
+      totalWeights += 0.25;
+    }
+
+    // 3. Activity / Step progress
+    const steps = activity?.steps || 0;
+    const stepGoal = activity?.stepGoal || 5000;
+    let stepScore = 0;
+    if (steps > 0 && stepGoal > 0) {
+      stepScore = Math.min(100, Math.round((steps / stepGoal) * 100));
+      weightedSum += stepScore * 0.2;
+      totalWeights += 0.2;
+    }
+
+    // 4. Routine checklist
+    const routineTotal = routineItems?.length || 0;
+    let routineScore = 100;
+    if (routineTotal > 0) {
+      const routineCompleted = routineItems.filter((r) => r.completed).length;
+      routineScore = Math.round((routineCompleted / routineTotal) * 100);
+      weightedSum += routineScore * 0.15;
+      totalWeights += 0.15;
+    }
+
+    // If completely fresh account with zero metrics configured/logged, start at clean unpenalized baseline 100
+    const totalScore = totalWeights > 0 ? Math.round(weightedSum / totalWeights) : 100;
 
     return {
       totalScore,
-      medicationScore,
-      hydrationScore,
-      activityScore: stepScore,
-      routineScore,
+      medicationScore: medTotal > 0 ? medicationScore : 100,
+      hydrationScore: currentLiters > 0 ? hydrationScore : (totalWeights === 0 ? 100 : 0),
+      activityScore: steps > 0 ? stepScore : (totalWeights === 0 ? 100 : 0),
+      routineScore: routineTotal > 0 ? routineScore : 100,
       weeklyScores: [
-        { day: 'Mon', score: 88 },
-        { day: 'Tue', score: 82 },
-        { day: 'Wed', score: 90 },
+        { day: 'Mon', score: totalScore },
+        { day: 'Tue', score: totalScore },
+        { day: 'Wed', score: totalScore },
         { day: 'Thu', score: totalScore },
-        { day: 'Fri', score: 85 },
-        { day: 'Sat', score: 80 },
-        { day: 'Sun', score: 86 },
+        { day: 'Fri', score: totalScore },
+        { day: 'Sat', score: totalScore },
+        { day: 'Sun', score: totalScore },
       ],
     };
   };
@@ -748,25 +828,9 @@ export const CareSyncProvider: React.FC<{ children: ReactNode }> = ({ children }
     {
       id: 'ins-1',
       type: 'positive',
-      title: 'Consistent Morning Routine',
-      description: 'Morning medication adherence has remained consistent this week. Excellent job!',
+      title: 'Daily Care Overview',
+      description: 'Your health rhythms and schedule synchronize with your care team in real-time.',
       timestamp: 'Today',
-      isDiagnostic: false,
-    },
-    {
-      id: 'ins-2',
-      type: 'warning',
-      title: 'Evening Reminder Observation',
-      description: 'Attention: Evening medication was missed twice over the last 5 days. Consider adjusting reminder 15 minutes earlier.',
-      timestamp: 'Yesterday',
-      isDiagnostic: false,
-    },
-    {
-      id: 'ins-3',
-      type: 'info',
-      title: 'Hydration & Activity Rhythm',
-      description: 'Higher activity scores tend to follow days when morning hydration is logged before 10 AM.',
-      timestamp: '2 days ago',
       isDiagnostic: false,
     },
   ];
@@ -788,7 +852,7 @@ export const CareSyncProvider: React.FC<{ children: ReactNode }> = ({ children }
     if (lower.includes('log water') || lower.includes('drank water') || lower.includes('glass of water')) {
       logWater(250);
     } else if (lower.includes('log medicine') || lower.includes('took my medicine') || lower.includes('took afternoon')) {
-      const dueMed = medications.find((m) => m.status === 'due') || medications[1];
+      const dueMed = medications.find((m) => m.status === 'due') || medications[0];
       if (dueMed) takeMedication(dueMed.id);
     } else if (lower.includes('start walk') || lower.includes('start a walk')) {
       startActivitySession('walk');
@@ -797,11 +861,7 @@ export const CareSyncProvider: React.FC<{ children: ReactNode }> = ({ children }
     try {
       const res = await sendAssistantMessage(userText, {
         patientName: patient.name,
-        medicationStatus: {
-          morning: medications[0]?.status,
-          afternoon: medications[1]?.status,
-          evening: medications[2]?.status,
-        },
+        medicationCount: medications.length,
         hydration: { current: hydration.currentLiters, goal: hydration.goalLiters },
         activity: { steps: activity.steps, target: activity.stepGoal },
         careScore: careScore.totalScore,
@@ -812,7 +872,7 @@ export const CareSyncProvider: React.FC<{ children: ReactNode }> = ({ children }
         sender: 'assistant',
         text: res.reply,
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-        suggestedActions: ['What do I need to do?', 'Log medicine', 'Log water (+250ml)', 'Start a walk'],
+        suggestedActions: ['What is my schedule?', 'Log water (+250ml)', 'Start a walk'],
       };
 
       setChatMessages((prev) => [...prev, assistantMsg]);
@@ -864,9 +924,13 @@ export const CareSyncProvider: React.FC<{ children: ReactNode }> = ({ children }
         assistantOpen,
         setAssistantOpen,
 
+        syncStatus,
+        triggerManualSync,
+
         patient,
         medications,
         hydration,
+        hydrationSettings,
         activity,
         routineItems,
         careScore,
@@ -887,8 +951,11 @@ export const CareSyncProvider: React.FC<{ children: ReactNode }> = ({ children }
         updateMedicationSchedule,
         deleteMedicationSchedule,
         logWater,
+        updateHydrationSettings,
         startActivitySession,
         stopActivitySession,
+        syncDeviceActivity,
+        updateProfilePhoto,
         toggleRoutineItem,
         markAlertReviewed,
         sendSOS,

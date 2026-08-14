@@ -1,42 +1,61 @@
 import React, { useState } from 'react';
 import { useCareSync } from '../../context/CareSyncContext';
-import { Pill, Clock, CheckCircle2, Plus, ArrowRight, ShieldCheck, Sparkles, X } from 'lucide-react';
+import { Pill, Clock, CheckCircle2, Plus, ShieldCheck, Sparkles, X, AlertCircle } from 'lucide-react';
 import { motion } from 'motion/react';
 
 export const MedicationView: React.FC = () => {
-  const { medications, takeMedication, snoozeMedication, addToast, addMedicationSchedule } = useCareSync();
+  const { medications, takeMedication, snoozeMedication, addToast, addMedicationSchedule, deleteMedicationSchedule } = useCareSync();
 
   const [newMedModal, setNewMedModal] = useState<boolean>(false);
   const [medName, setMedName] = useState<string>('');
   const [medDosage, setMedDosage] = useState<string>('');
-  const [medTime, setMedTime] = useState<string>('12:00 PM');
+  const [medTimePicker, setMedTimePicker] = useState<string>('08:00');
+  const [medCategory, setMedCategory] = useState<'morning' | 'afternoon' | 'evening'>('morning');
+  const [medInstructions, setMedInstructions] = useState<string>('');
 
-  const takenCount = medications.filter((m) => m.status === 'taken').length;
-  const totalCount = medications.length;
-  const adherencePercent = 94; // Realistic demo rate
+  const activeMeds = medications.filter((m) => m.status !== undefined);
+  const takenCount = activeMeds.filter((m) => m.status === 'taken').length;
+  const totalCount = activeMeds.length;
+  const adherencePercent = totalCount > 0 ? Math.round((takenCount / totalCount) * 100) : 100;
 
   const nextMedication =
-    medications.find((m) => m.status === 'due') ||
-    medications.find((m) => m.status === 'upcoming') ||
-    medications[0];
+    activeMeds.find((m) => m.status === 'due') ||
+    activeMeds.find((m) => m.status === 'upcoming') ||
+    (activeMeds.length > 0 ? activeMeds[0] : null);
+
+  // Convert 24h format (e.g. 14:30) to 12h AM/PM (e.g. 02:30 PM)
+  const format24hTo12h = (time24: string): string => {
+    if (!time24) return '08:00 AM';
+    const [hStr, mStr] = time24.split(':');
+    let hours = parseInt(hStr, 10);
+    const minutes = mStr || '00';
+    const ampm = hours >= 12 ? 'PM' : 'AM';
+    if (hours === 0) hours = 12;
+    else if (hours > 12) hours -= 12;
+    return `${String(hours).padStart(2, '0')}:${minutes} ${ampm}`;
+  };
 
   const handleAddMedication = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!medName.trim()) return;
-    if (addMedicationSchedule) {
+
+    const formattedTime = format24hTo12h(medTimePicker);
+
+    try {
       await addMedicationSchedule({
-        name: medName,
-        dosage: medDosage || '1 tablet',
-        scheduledTime: medTime || '12:00 PM',
-        instructions: 'Take as prescribed',
-        category: 'afternoon',
+        name: medName.trim(),
+        dosage: medDosage.trim() || '1 tablet',
+        scheduledTime: formattedTime,
+        instructions: medInstructions.trim() || 'Take as prescribed',
+        category: medCategory,
       });
-    } else {
-      addToast(`Added new medication schedule for ${medName}`, 'success');
+      setNewMedModal(false);
+      setMedName('');
+      setMedDosage('');
+      setMedInstructions('');
+    } catch (err) {
+      console.error(err);
     }
-    setNewMedModal(false);
-    setMedName('');
-    setMedDosage('');
   };
 
   return (
@@ -56,7 +75,9 @@ export const MedicationView: React.FC = () => {
               Medication Management
             </h1>
             <p className="text-base text-stone-600 font-medium mt-1">
-              Confirmed {takenCount} of {totalCount} scheduled doses for today.
+              {totalCount > 0
+                ? `Confirmed ${takenCount} of ${totalCount} scheduled doses for today.`
+                : 'No medications scheduled today. Add your daily prescriptions below.'}
             </p>
           </div>
 
@@ -84,7 +105,7 @@ export const MedicationView: React.FC = () => {
       </motion.section>
 
       {/* 2. PRIMARY ACTIONABLE FOCUS: CURRENT / NEXT MEDICATION */}
-      {nextMedication && (
+      {nextMedication ? (
         <section className="space-y-3">
           <div className="flex items-center justify-between">
             <h2 className="text-xs font-bold uppercase tracking-widest text-teal-800 flex items-center gap-1.5">
@@ -99,203 +120,153 @@ export const MedicationView: React.FC = () => {
           <div className="bg-white border border-stone-200/90 rounded-2xl p-6 sm:p-7 shadow-xs space-y-5">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-stone-100 pb-4">
               <div className="flex items-center gap-3.5">
-                <div className="w-11 h-11 rounded-xl bg-amber-50 border border-amber-200/80 text-amber-900 flex items-center justify-center shrink-0">
-                  <Pill className="w-5 h-5" />
+                <div className="w-12 h-12 rounded-2xl bg-teal-50 border border-teal-100 text-teal-700 flex items-center justify-center">
+                  <Pill className="w-6 h-6" />
                 </div>
                 <div>
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs font-bold text-stone-500">{nextMedication.scheduledTime}</span>
-                    <span
-                      className={`px-2.5 py-0.5 rounded-full text-[11px] font-bold border ${
-                        nextMedication.status === 'taken'
-                          ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
-                          : nextMedication.status === 'due'
-                          ? 'bg-amber-50 text-amber-900 border-amber-300 animate-pulse'
-                          : 'bg-stone-100 text-stone-700 border-stone-200'
-                      }`}
-                    >
-                      {nextMedication.status === 'taken'
-                        ? 'Taken ✓'
-                        : nextMedication.status === 'due'
-                        ? 'Due Now'
-                        : 'Scheduled'}
-                    </span>
-                  </div>
-                  <h3 className="text-2xl font-bold text-stone-900 mt-0.5">{nextMedication.name}</h3>
+                  <h3 className="text-xl font-bold text-stone-900">{nextMedication.name}</h3>
+                  <p className="text-xs font-semibold text-stone-500">{nextMedication.dosage}</p>
                 </div>
               </div>
 
-              <div className="text-xs text-stone-600 font-medium sm:text-right">
-                <span className="block text-sm font-bold text-stone-900">{nextMedication.dosage}</span>
-                <span className="text-stone-500">{nextMedication.instructions}</span>
+              <div className="flex items-center gap-2">
+                <span
+                  className={`px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider ${
+                    nextMedication.status === 'taken'
+                      ? 'bg-emerald-100 text-emerald-800'
+                      : nextMedication.status === 'due'
+                      ? 'bg-amber-100 text-amber-900 animate-pulse'
+                      : 'bg-stone-100 text-stone-700'
+                  }`}
+                >
+                  {nextMedication.status === 'taken'
+                    ? 'Taken Today'
+                    : nextMedication.status === 'due'
+                    ? 'Due Now'
+                    : 'Upcoming'}
+                </span>
               </div>
             </div>
 
-            <p className="text-sm text-stone-600 leading-relaxed">
-              {nextMedication.status === 'taken'
-                ? 'All current medications are up to date for today. You can view full schedule below.'
-                : 'Please take this dose with a full glass of water at your designated time.'}
+            <p className="text-xs text-stone-600 font-medium bg-stone-50 p-3.5 rounded-xl border border-stone-100">
+              💡 <span className="font-semibold text-stone-800">Instructions:</span> {nextMedication.instructions}
             </p>
 
-            <div className="flex flex-wrap items-center gap-3 pt-1">
+            <div className="flex items-center gap-3 pt-2">
               {nextMedication.status !== 'taken' ? (
                 <>
                   <button
                     onClick={() => takeMedication(nextMedication.id)}
-                    className="py-3.5 px-6 rounded-xl bg-teal-700 hover:bg-teal-800 text-white font-bold text-sm shadow-xs transition-colors flex items-center gap-2"
+                    className="flex-1 py-3.5 px-4 rounded-xl bg-teal-700 hover:bg-teal-800 text-white font-bold text-xs shadow-xs transition-colors flex items-center justify-center gap-2"
                   >
                     <CheckCircle2 className="w-4 h-4" />
-                    Mark as taken
+                    Confirm Taken ({nextMedication.scheduledTime})
                   </button>
                   <button
-                    onClick={() => snoozeMedication(nextMedication.id, 30)}
-                    className="py-3.5 px-5 rounded-xl border border-stone-200 text-stone-700 hover:bg-stone-50 font-semibold text-sm transition-colors"
+                    onClick={() => snoozeMedication(nextMedication.id, 15)}
+                    className="py-3.5 px-4 rounded-xl border border-stone-200 text-stone-600 hover:bg-stone-50 font-semibold text-xs transition-colors flex items-center justify-center gap-1.5"
                   >
-                    Remind me later
+                    <Clock className="w-4 h-4" />
+                    Snooze 15m
                   </button>
                 </>
               ) : (
-                <div className="py-2.5 px-4 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-800 font-bold text-xs flex items-center gap-2">
-                  <CheckCircle2 className="w-4 h-4 text-emerald-600" />
-                  Dose Confirmed at {nextMedication.takenAt || nextMedication.scheduledTime}
+                <div className="w-full py-3 px-4 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-800 font-bold text-xs flex items-center justify-center gap-2">
+                  <CheckCircle2 className="w-4 h-4" />
+                  Confirmed Taken at {nextMedication.takenAt || 'today'}
                 </div>
               )}
             </div>
           </div>
         </section>
+      ) : (
+        <section className="bg-stone-50 border border-dashed border-stone-200 rounded-3xl p-8 text-center space-y-3">
+          <div className="w-12 h-12 rounded-2xl bg-white border border-stone-200 text-stone-400 flex items-center justify-center mx-auto">
+            <Pill className="w-6 h-6" />
+          </div>
+          <h3 className="text-base font-bold text-stone-800">No Medication Schedule Configured</h3>
+          <p className="text-xs text-stone-500 max-w-sm mx-auto">
+            Add your daily medications to receive automated alarms, reminder chimes, and adherence tracking.
+          </p>
+          <button
+            onClick={() => setNewMedModal(true)}
+            className="py-2.5 px-5 rounded-xl bg-teal-700 hover:bg-teal-800 text-white font-bold text-xs shadow-xs transition-colors inline-flex items-center gap-2"
+          >
+            <Plus className="w-4 h-4" />
+            Add First Medication
+          </button>
+        </section>
       )}
 
-      {/* 3. TODAY'S TIMELINE / HISTORY */}
+      {/* 3. DAILY SCHEDULE LIST */}
       <section className="space-y-4">
         <div className="flex items-center justify-between">
-          <h2 className="text-xs font-bold uppercase tracking-widest text-teal-800">
-            Today's Schedule & History
-          </h2>
-          <span className="text-xs font-semibold text-stone-500">
-            {takenCount} of {totalCount} Completed
-          </span>
+          <h2 className="text-xs font-bold uppercase tracking-widest text-stone-700">All Scheduled Doses</h2>
+          <span className="text-xs font-semibold text-stone-500">{activeMeds.length} Active Prescriptions</span>
         </div>
 
-        <div className="bg-white border border-stone-200/90 rounded-2xl p-6 shadow-xs space-y-6">
-          <div className="relative pl-6 space-y-6 before:absolute before:left-2.5 before:top-3 before:bottom-3 before:w-0.5 before:bg-stone-200">
-            {medications.map((med) => (
-              <motion.div
-                key={med.id}
-                whileHover={{ x: 2 }}
-                className="relative flex flex-col md:flex-row md:items-center justify-between gap-4 p-4 rounded-xl bg-stone-50/70 border border-stone-200/80 transition-all"
-              >
-                {/* Status Dot */}
-                <div
-                  className={`absolute -left-[27px] top-5 w-4 h-4 rounded-full ring-4 ring-white ${
-                    med.status === 'taken'
-                      ? 'bg-emerald-600'
-                      : med.status === 'due'
-                      ? 'bg-amber-500 animate-pulse'
-                      : 'bg-stone-300'
-                  }`}
-                />
-
-                <div className="space-y-1">
+        <div className="space-y-3">
+          {activeMeds.map((med) => (
+            <div
+              key={med.id}
+              className="bg-white border border-stone-200/80 rounded-2xl p-4 sm:p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4 shadow-2xs hover:border-teal-200 transition-colors"
+            >
+              <div className="flex items-center gap-3.5">
+                <div className="w-10 h-10 rounded-xl bg-stone-100 text-stone-700 flex items-center justify-center shrink-0">
+                  <Pill className="w-5 h-5" />
+                </div>
+                <div>
                   <div className="flex items-center gap-2">
-                    <span className="text-xs font-bold text-stone-500">{med.scheduledTime}</span>
-                    <span
-                      className={`px-2.5 py-0.5 rounded-full text-[11px] font-bold border ${
-                        med.status === 'taken'
-                          ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
-                          : med.status === 'due'
-                          ? 'bg-amber-50 text-amber-900 border-amber-300'
-                          : 'bg-stone-100 text-stone-700 border-stone-200'
-                      }`}
-                    >
-                      {med.status === 'taken'
-                        ? 'Taken ✓'
-                        : med.status === 'due'
-                        ? 'Due Now'
-                        : 'Upcoming'}
+                    <h4 className="text-sm font-bold text-stone-900">{med.name}</h4>
+                    <span className="text-[10px] uppercase font-extrabold px-2 py-0.5 rounded-md bg-stone-100 text-stone-600">
+                      {med.category}
                     </span>
                   </div>
-                  <h3 className="text-base font-bold text-stone-900">{med.name}</h3>
-                  <p className="text-xs text-stone-600 font-medium">{med.dosage}</p>
-                  <p className="text-[11px] text-stone-400">{med.instructions}</p>
+                  <p className="text-xs text-stone-500 font-medium">
+                    {med.dosage} • <span className="font-semibold text-teal-800">{med.scheduledTime}</span>
+                  </p>
                 </div>
-
-                <div className="flex items-center gap-2">
-                  {med.status !== 'taken' ? (
-                    <>
-                      <button
-                        onClick={() => takeMedication(med.id)}
-                        className="py-2 px-3.5 rounded-lg bg-teal-700 hover:bg-teal-800 text-white font-bold text-xs transition-colors flex items-center gap-1.5"
-                      >
-                        <CheckCircle2 className="w-3.5 h-3.5" />
-                        Mark Taken
-                      </button>
-                      <button
-                        onClick={() => snoozeMedication(med.id, 30)}
-                        className="py-2 px-3 rounded-lg border border-stone-200 text-stone-600 hover:bg-white font-medium text-xs transition-colors"
-                      >
-                        Snooze
-                      </button>
-                    </>
-                  ) : (
-                    <span className="text-xs font-bold text-emerald-800 bg-emerald-50 px-3 py-1.5 rounded-lg border border-emerald-200 flex items-center gap-1">
-                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
-                      Confirmed ({med.takenAt || med.scheduledTime})
-                    </span>
-                  )}
-                </div>
-              </motion.div>
-            ))}
-          </div>
-        </div>
-      </section>
-
-      {/* 4. WEEKLY ADHERENCE TREND */}
-      <section className="space-y-4">
-        <div className="flex items-center justify-between">
-          <h2 className="text-xs font-bold uppercase tracking-widest text-teal-800">
-            Weekly Adherence Summary
-          </h2>
-          <span className="text-xs font-semibold text-stone-500">
-            Weekly Target: &gt;90%
-          </span>
-        </div>
-
-        <div className="bg-white border border-stone-200/90 rounded-2xl p-6 shadow-xs space-y-4">
-          <div className="grid grid-cols-7 gap-2 pt-2 text-center">
-            {[
-              { day: 'Mon', rate: 100 },
-              { day: 'Tue', rate: 100 },
-              { day: 'Wed', rate: 100 },
-              { day: 'Thu', rate: 66 },
-              { day: 'Fri', rate: 100 },
-              { day: 'Sat', rate: 100 },
-              { day: 'Sun', rate: 100 },
-            ].map((item, idx) => (
-              <div key={idx} className="flex flex-col items-center gap-2">
-                <div className="w-full h-20 bg-stone-100 rounded-xl p-1 flex items-end">
-                  <div
-                    className={`w-full rounded-lg transition-all duration-500 ${
-                      item.rate >= 90 ? 'bg-teal-700' : 'bg-amber-600'
-                    }`}
-                    style={{ height: `${item.rate}%` }}
-                  />
-                </div>
-                <span className="text-xs font-bold text-stone-700">{item.day}</span>
-                <span className="text-[10px] text-stone-400 font-semibold">{item.rate}%</span>
               </div>
-            ))}
-          </div>
+
+              <div className="flex items-center gap-2.5 self-end sm:self-center">
+                {med.status !== 'taken' ? (
+                  <button
+                    onClick={() => takeMedication(med.id)}
+                    className="py-2 px-3.5 rounded-xl bg-stone-900 hover:bg-black text-white font-bold text-xs transition-colors flex items-center gap-1.5"
+                  >
+                    <CheckCircle2 className="w-3.5 h-3.5" />
+                    Take Dose
+                  </button>
+                ) : (
+                  <span className="px-3 py-1.5 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-800 font-bold text-xs flex items-center gap-1">
+                    <CheckCircle2 className="w-3.5 h-3.5" />
+                    Taken
+                  </span>
+                )}
+
+                <button
+                  onClick={() => deleteMedicationSchedule(med.id)}
+                  title="Remove from schedule"
+                  className="p-2 text-stone-400 hover:text-rose-600 rounded-lg hover:bg-rose-50 transition-colors"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+          ))}
         </div>
       </section>
 
-      {/* 5. ADD MEDICATION MODAL */}
+      {/* 4. MODAL: ADD MEDICATION SCHEDULE WITH STRUCTURED TIME PICKER */}
       {newMedModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-stone-900/50 backdrop-blur-xs">
-          <div className="bg-white rounded-2xl max-w-md w-full p-6 shadow-xl border border-stone-200 space-y-4">
+        <div className="fixed inset-0 z-50 bg-stone-950/40 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl p-6 sm:p-7 max-w-md w-full border border-stone-200 shadow-2xl space-y-5">
             <div className="flex items-center justify-between border-b border-stone-100 pb-3">
-              <div>
-                <h3 className="text-lg font-bold text-stone-900">Add Medication Schedule</h3>
-                <p className="text-xs text-stone-500 mt-0.5">Set up a daily reminder confirmation.</p>
+              <div className="flex items-center gap-2">
+                <div className="w-8 h-8 rounded-xl bg-teal-50 text-teal-700 flex items-center justify-center">
+                  <Pill className="w-4 h-4" />
+                </div>
+                <h3 className="text-base font-bold text-stone-900">Add Medication Schedule</h3>
               </div>
               <button
                 onClick={() => setNewMedModal(false)}
@@ -305,41 +276,74 @@ export const MedicationView: React.FC = () => {
               </button>
             </div>
 
-            <form onSubmit={handleAddMedication} className="space-y-3.5">
+            <form onSubmit={handleAddMedication} className="space-y-4">
               <div>
                 <label className="text-xs font-bold text-stone-700 block mb-1">Medication Name</label>
                 <input
                   type="text"
                   required
-                  placeholder="e.g. Calcium Citrate"
+                  placeholder="e.g. Lisinopril or Vitamin D3"
                   value={medName}
                   onChange={(e) => setMedName(e.target.value)}
                   className="w-full bg-stone-50 border border-stone-200 rounded-xl p-3 text-xs font-medium text-stone-800 focus:outline-none focus:ring-2 focus:ring-teal-700"
                 />
               </div>
 
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-xs font-bold text-stone-700 block mb-1">Dosage</label>
+                  <input
+                    type="text"
+                    required
+                    placeholder="e.g. 10mg / 1 tablet"
+                    value={medDosage}
+                    onChange={(e) => setMedDosage(e.target.value)}
+                    className="w-full bg-stone-50 border border-stone-200 rounded-xl p-3 text-xs font-medium text-stone-800 focus:outline-none focus:ring-2 focus:ring-teal-700"
+                  />
+                </div>
+
+                <div>
+                  <label className="text-xs font-bold text-stone-700 block mb-1">Category</label>
+                  <select
+                    value={medCategory}
+                    onChange={(e) => setMedCategory(e.target.value as any)}
+                    className="w-full bg-stone-50 border border-stone-200 rounded-xl p-3 text-xs font-medium text-stone-800 focus:outline-none focus:ring-2 focus:ring-teal-700"
+                  >
+                    <option value="morning">Morning</option>
+                    <option value="afternoon">Afternoon</option>
+                    <option value="evening">Evening</option>
+                  </select>
+                </div>
+              </div>
+
+              {/* Structured Time Picker */}
               <div>
-                <label className="text-xs font-bold text-stone-700 block mb-1">Dosage & Instructions</label>
-                <input
-                  type="text"
-                  placeholder="e.g. 500mg - Take 1 tablet with warm water"
-                  value={medDosage}
-                  onChange={(e) => setMedDosage(e.target.value)}
-                  className="w-full bg-stone-50 border border-stone-200 rounded-xl p-3 text-xs font-medium text-stone-800 focus:outline-none focus:ring-2 focus:ring-teal-700"
-                />
+                <label className="text-xs font-bold text-stone-700 block mb-1">
+                  Scheduled Daily Time (Time Picker)
+                </label>
+                <div className="flex items-center gap-3">
+                  <input
+                    type="time"
+                    required
+                    value={medTimePicker}
+                    onChange={(e) => setMedTimePicker(e.target.value)}
+                    className="flex-1 bg-stone-50 border border-stone-200 rounded-xl p-3 text-sm font-bold text-stone-900 focus:outline-none focus:ring-2 focus:ring-teal-700"
+                  />
+                  <div className="px-3.5 py-2.5 bg-teal-50 border border-teal-200 rounded-xl text-teal-800 font-extrabold text-xs">
+                    {format24hTo12h(medTimePicker)}
+                  </div>
+                </div>
               </div>
 
               <div>
-                <label className="text-xs font-bold text-stone-700 block mb-1">Scheduled Time</label>
-                <select
-                  value={medTime}
-                  onChange={(e) => setMedTime(e.target.value)}
+                <label className="text-xs font-bold text-stone-700 block mb-1">Instructions / Note</label>
+                <input
+                  type="text"
+                  placeholder="e.g. Take with warm water after breakfast"
+                  value={medInstructions}
+                  onChange={(e) => setMedInstructions(e.target.value)}
                   className="w-full bg-stone-50 border border-stone-200 rounded-xl p-3 text-xs font-medium text-stone-800 focus:outline-none focus:ring-2 focus:ring-teal-700"
-                >
-                  <option value="08:00 AM">08:00 AM (Morning)</option>
-                  <option value="01:00 PM">01:00 PM (Afternoon)</option>
-                  <option value="08:00 PM">08:00 PM (Evening)</option>
-                </select>
+                />
               </div>
 
               <div className="flex gap-2.5 pt-3 border-t border-stone-100">
@@ -364,4 +368,3 @@ export const MedicationView: React.FC = () => {
     </div>
   );
 };
-

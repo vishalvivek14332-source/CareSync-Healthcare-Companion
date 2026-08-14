@@ -9,6 +9,8 @@ import {
   LogOut,
   User,
   Users,
+  WifiOff,
+  RefreshCw,
 } from 'lucide-react';
 import { NotificationDrawer } from './NotificationDrawer';
 
@@ -18,6 +20,8 @@ export const Header: React.FC = () => {
     activeRole,
     patient,
     notifications,
+    syncStatus,
+    triggerManualSync,
     setSosModalOpen,
     setOnboardingCompleted,
     setActivePatientTab,
@@ -53,6 +57,22 @@ export const Header: React.FC = () => {
                 }`}>
                   {activeRole === 'patient' ? 'Patient App' : 'Caregiver Hub'}
                 </span>
+                {syncStatus === 'OFFLINE' && (
+                  <button
+                    onClick={() => triggerManualSync()}
+                    title="You are offline. Click to retry connection."
+                    className="flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-50 text-amber-800 border border-amber-300 hover:bg-amber-100 transition-colors"
+                  >
+                    <WifiOff className="w-3 h-3 text-amber-600" />
+                    <span>Offline</span>
+                  </button>
+                )}
+                {syncStatus === 'SYNCING' && (
+                  <span className="flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full bg-sky-50 text-sky-800 border border-sky-300 animate-pulse">
+                    <RefreshCw className="w-3 h-3 text-sky-600 animate-spin" />
+                    <span>Syncing...</span>
+                  </span>
+                )}
               </div>
               <p className="text-xs text-slate-500 font-medium hidden lg:block">
                 Personal Healthcare Companion

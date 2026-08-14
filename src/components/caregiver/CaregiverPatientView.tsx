@@ -42,11 +42,35 @@ export const CaregiverPatientView: React.FC = () => {
   const [medInstructions, setMedInstructions] = useState<string>('');
   const [medCategory, setMedCategory] = useState<'morning' | 'afternoon' | 'evening'>('morning');
 
+  // Convert 24h format (e.g. 14:30) to 12h AM/PM (e.g. 02:30 PM)
+  const format24hTo12h = (time24: string): string => {
+    if (!time24) return '08:00 AM';
+    const [hStr, mStr] = time24.split(':');
+    let hours = parseInt(hStr, 10);
+    const minutes = mStr || '00';
+    const ampm = hours >= 12 ? 'PM' : 'AM';
+    if (hours === 0) hours = 12;
+    else if (hours > 12) hours -= 12;
+    return `${String(hours).padStart(2, '0')}:${minutes} ${ampm}`;
+  };
+
+  const format12hTo24h = (time12: string): string => {
+    if (!time12) return '08:00';
+    const match = time12.match(/(\d+):(\d+)\s*(AM|PM)?/i);
+    if (!match) return '08:00';
+    let h = parseInt(match[1], 10);
+    const m = match[2].padStart(2, '0');
+    const ampm = match[3]?.toUpperCase();
+    if (ampm === 'PM' && h < 12) h += 12;
+    if (ampm === 'AM' && h === 12) h = 0;
+    return `${String(h).padStart(2, '0')}:${m}`;
+  };
+
   const openAddModal = () => {
     setEditingMedId(null);
     setMedName('');
     setMedDosage('');
-    setMedTime('08:00 AM');
+    setMedTime('08:00');
     setMedInstructions('');
     setMedCategory('morning');
     setModalOpen(true);
@@ -56,7 +80,7 @@ export const CaregiverPatientView: React.FC = () => {
     setEditingMedId(med.id);
     setMedName(med.name);
     setMedDosage(med.dosage);
-    setMedTime(med.scheduledTime);
+    setMedTime(format12hTo24h(med.scheduledTime));
     setMedInstructions(med.instructions || '');
     setMedCategory(med.category || 'morning');
     setModalOpen(true);
@@ -69,11 +93,13 @@ export const CaregiverPatientView: React.FC = () => {
       return;
     }
 
+    const formattedTime = format24hTo12h(medTime);
+
     if (editingMedId) {
       await updateMedicationSchedule(editingMedId, {
         name: medName,
         dosage: medDosage,
-        scheduledTime: medTime,
+        scheduledTime: formattedTime,
         instructions: medInstructions,
         category: medCategory,
       });
@@ -81,7 +107,7 @@ export const CaregiverPatientView: React.FC = () => {
       await addMedicationSchedule({
         name: medName,
         dosage: medDosage,
-        scheduledTime: medTime,
+        scheduledTime: formattedTime,
         instructions: medInstructions,
         category: medCategory,
         patientId: selectedPatientId || patient.id,
@@ -320,14 +346,15 @@ export const CaregiverPatientView: React.FC = () => {
                   </div>
 
                   <div>
-                    <label className="text-xs font-bold text-slate-700 block mb-1">Scheduled Time *</label>
+                    <label className="text-xs font-bold text-slate-700 block mb-1">
+                      Scheduled Time * ({format24hTo12h(medTime)})
+                    </label>
                     <input
-                      type="text"
+                      type="time"
                       required
-                      placeholder="e.g. 08:00 AM"
                       value={medTime}
                       onChange={(e) => setMedTime(e.target.value)}
-                      className="w-full bg-slate-50 border border-slate-200 rounded-xl p-3 text-xs font-semibold text-slate-800 focus:outline-none focus:ring-2 focus:ring-teal-700"
+                      className="w-full bg-slate-50 border border-slate-200 rounded-xl p-3 text-xs font-bold text-slate-900 focus:outline-none focus:ring-2 focus:ring-teal-700"
                     />
                   </div>
                 </div>
