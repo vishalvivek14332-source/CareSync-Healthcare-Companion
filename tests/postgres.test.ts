@@ -123,6 +123,79 @@ async function testPostgresCompatibility() {
     }
     console.log('✅ PASS: NotificationService correctly records notifications');
 
+    // Test 7: Caretaker Signup with Valid Connection Code
+    const freshCodeInfo = await createConnectionCodeForPatient(patientId);
+    const cgSignupEmail = `caretaker-signup-${Date.now()}@example.com`;
+    const cgSignupRes = await fetch(`${baseUrl}/api/auth/signup`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        email: cgSignupEmail,
+        password: 'Password123!',
+        role: 'caregiver',
+        name: 'Connected Caregiver Emma',
+        connectionCode: freshCodeInfo.code,
+      }),
+    });
+    const cgSignupData: any = await cgSignupRes.json();
+    if (cgSignupRes.status !== 201 || !cgSignupData.token || !cgSignupData.linkedPatient) {
+      throw new Error(`Caretaker signup failed with status ${cgSignupRes.status}: ${JSON.stringify(cgSignupData)}`);
+    }
+    console.log('✅ PASS: Caretaker signup with valid connection code creates account and establishes relationship');
+
+    // Test 8: Caretaker Signup with Invalid Connection Code (Rejected with 400)
+    const cgInvalidCodeRes = await fetch(`${baseUrl}/api/auth/signup`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        email: `caretaker-invalid-${Date.now()}@example.com`,
+        password: 'Password123!',
+        role: 'caregiver',
+        name: 'Invalid Code Caregiver',
+        connectionCode: 'CARE-INVALID1',
+      }),
+    });
+    if (cgInvalidCodeRes.status !== 400) {
+      throw new Error(`Caretaker signup with invalid code should return 400, got ${cgInvalidCodeRes.status}`);
+    }
+    console.log('✅ PASS: Caretaker signup with invalid connection code is rejected with 400');
+
+    // Test 9: Caretaker Signup with Revoked/Expired Connection Code (Rejected with 400)
+    const revokedCodeInfo = await createConnectionCodeForPatient(patientId);
+    // Create another code which immediately revokes the first one
+    await createConnectionCodeForPatient(patientId);
+
+    const cgRevokedCodeRes = await fetch(`${baseUrl}/api/auth/signup`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        email: `caretaker-revoked-${Date.now()}@example.com`,
+        password: 'Password123!',
+        role: 'caregiver',
+        name: 'Revoked Code Caregiver',
+        connectionCode: revokedCodeInfo.code,
+      }),
+    });
+    if (cgRevokedCodeRes.status !== 400) {
+      throw new Error(`Caretaker signup with revoked code should return 400, got ${cgRevokedCodeRes.status}`);
+    }
+    console.log('✅ PASS: Caretaker signup with revoked connection code is rejected with 400');
+
+    // Test 10: Caretaker Sign In still works
+    const cgLoginRes = await fetch(`${baseUrl}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        email: cgSignupEmail,
+        password: 'Password123!',
+      }),
+    });
+    const cgLoginData: any = await cgLoginRes.json();
+    if (cgLoginRes.status !== 200 || !cgLoginData.token || cgLoginData.user.role !== 'caregiver') {
+      throw new Error(`Caretaker login failed: ${JSON.stringify(cgLoginData)}`);
+    }
+    console.log('✅ PASS: Existing caretaker sign-in authenticates successfully with 200');
+
     console.log('\n===================================================================');
     console.log('   ALL POSTGRESQL ABSTRACTION & HTTP ENDPOINT TESTS PASSED');
     console.log('===================================================================\n');

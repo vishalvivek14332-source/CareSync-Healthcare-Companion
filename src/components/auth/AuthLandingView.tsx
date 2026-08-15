@@ -36,11 +36,17 @@ export const AuthLandingView: React.FC = () => {
   const [caregiverName, setCaregiverName] = useState<string>('');
   const [caregiverPhone, setCaregiverPhone] = useState<string>('');
   const [caregiverEmail, setCaregiverEmail] = useState<string>('');
+  const [patientConnectionCode, setPatientConnectionCode] = useState<string>('');
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!email || !password || (authMode === 'signup' && !name)) {
       addToast('Please fill in all required fields', 'warning');
+      return;
+    }
+
+    if (authMode === 'signup' && selectedRole === 'caregiver' && !patientConnectionCode.trim()) {
+      addToast('Please enter the patient connection code (e.g. CARE-7K4P9Q)', 'warning');
       return;
     }
 
@@ -57,6 +63,7 @@ export const AuthLandingView: React.FC = () => {
           primaryCaregiver: selectedRole === 'patient' ? caregiverName : undefined,
           caregiverPhone: selectedRole === 'patient' ? caregiverPhone : undefined,
           caregiverEmail: selectedRole === 'patient' ? caregiverEmail : undefined,
+          connectionCode: selectedRole === 'caregiver' ? patientConnectionCode.trim().toUpperCase() : undefined,
         });
       } else {
         await login(email, password);
@@ -324,6 +331,27 @@ export const AuthLandingView: React.FC = () => {
                         />
                       </div>
                     </div>
+                  </div>
+                )}
+
+                {/* Caregiver Onboarding: Patient Connection Code */}
+                {authMode === 'signup' && selectedRole === 'caregiver' && (
+                  <div className="pt-2 border-t border-slate-100 space-y-2">
+                    <label className="text-xs font-bold text-slate-700 block">
+                      Patient Connection Code *
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      value={patientConnectionCode}
+                      onChange={(e) => setPatientConnectionCode(e.target.value.toUpperCase())}
+                      placeholder="e.g. CARE-7K4P9Q"
+                      maxLength={14}
+                      className="w-full bg-slate-50 border-2 border-indigo-100 rounded-xl p-3 text-xs font-mono font-bold tracking-wider text-indigo-950 focus:outline-none focus:ring-2 focus:ring-indigo-600 uppercase placeholder:normal-case placeholder:font-sans placeholder:tracking-normal placeholder:font-normal"
+                    />
+                    <p className="text-[11px] text-slate-500 font-medium">
+                      Enter the connection code provided by the patient.
+                    </p>
                   </div>
                 )}
 

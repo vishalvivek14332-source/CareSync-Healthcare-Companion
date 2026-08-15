@@ -9,7 +9,12 @@ import {
   authenticateToken,
   AuthenticatedRequest,
 } from '../auth';
-import { createConnectionCodeForPatient, getActiveConnectionCode } from '../services/connectionCodeService';
+import {
+  createConnectionCodeForPatient,
+  getActiveConnectionCode,
+  redeemConnectionCode,
+  hashCode,
+} from '../services/connectionCodeService';
 
 export const authRouter = Router();
 
@@ -29,6 +34,9 @@ authRouter.post('/signup', async (req: Request, res: Response) => {
       emergencyPhone,
       quietHours,
       timezone,
+      connectionCode: inputConnectionCode,
+      linkCode,
+      code,
     } = req.body;
 
     if (!email || !password || !role || !name) {
@@ -47,6 +55,32 @@ authRouter.post('/signup', async (req: Request, res: Response) => {
     const existing = await queryRow('SELECT id FROM users WHERE email = ?', [emailNorm]);
     if (existing) {
       return res.status(409).json({ error: 'An account with this email address already exists' });
+    }
+
+    // Caretaker Onboarding: Pre-validate patient connection code if provided
+    let cleanCode = '';
+    if (role === 'caregiver') {
+      const rawCode = inputConnectionCode || linkCode || code;
+      if (rawCode && typeof rawCode === 'string' && rawCode.trim()) {
+        cleanCode = rawCode.trim().toUpperCase();
+        const codeHash = hashCode(cleanCode);
+        const nowIso = new Date().toISOString();
+
+        const codeRecord = await queryRow<any>(`
+          SELECT c.*, u.id as "patientId", u.name as "patientName"
+          FROM care_connection_codes c
+          JOIN users u ON c.patient_id = u.id
+          WHERE (c.code_hash = ? OR c.code_display = ?)
+            AND c.revoked_at IS NULL
+            AND c.expires_at > ?
+        `, [codeHash, cleanCode, nowIso]);
+
+        if (!codeRecord) {
+          return res.status(400).json({
+            error: 'Invalid, expired, or revoked patient connection code. Please check the code provided by the patient.',
+          });
+        }
+      }
     }
 
     const passwordHash = await bcrypt.hash(password, 10);
@@ -75,8 +109,21 @@ authRouter.post('/signup', async (req: Request, res: Response) => {
 
     // If registered as patient, automatically generate a unique CARE-XXXXXX connection code
     let connectionCode: any = null;
+    let linkedPatient: any = null;
+
     if (role === 'patient') {
       connectionCode = await createConnectionCodeForPatient(userId);
+    } else if (role === 'caregiver' && cleanCode) {
+      // Establish caregiver <-> patient link using existing connection-code service
+      const redeemResult = await redeemConnectionCode(userId, cleanCode);
+      if (!redeemResult.success) {
+        // Rollback user creation if redeem failed
+        await executeSql('DELETE FROM users WHERE id = ?', [userId]);
+        return res.status(400).json({
+          error: redeemResult.error || 'Failed to establish caretaker relationship with patient',
+        });
+      }
+      linkedPatient = redeemResult.patient;
     }
 
     const userPayload = { userId, email: emailNorm, role };
@@ -95,6 +142,7 @@ authRouter.post('/signup', async (req: Request, res: Response) => {
       refreshToken,
       user: userRecord,
       connectionCode,
+      linkedPatient,
     });
   } catch (err: any) {
     console.error('Signup error:', err);

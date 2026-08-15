@@ -495,7 +495,8 @@ export const CareSyncProvider: React.FC<{ children: ReactNode }> = ({ children }
     const res = await signupApi(data);
     setCurrentUser(res.user);
     if (res.connectionCode) setConnectionCode(res.connectionCode);
-    await loadDataForSession(res.user);
+    const targetPatientId = res.linkedPatient?.id;
+    await loadDataForSession(res.user, targetPatientId);
     addToast(`Account created successfully! Welcome to CareSync.`, 'success');
   };
 

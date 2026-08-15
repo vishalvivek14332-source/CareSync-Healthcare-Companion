@@ -473,8 +473,15 @@ export async function signupApi(data: {
   primaryCaregiver?: string;
   caregiverPhone?: string;
   caregiverEmail?: string;
+  connectionCode?: string;
 }) {
-  const res = await request<{ token: string; refreshToken?: string; user: UserProfile; connectionCode?: { code: string; expiresAt: string } }>('/api/auth/signup', {
+  const res = await request<{
+    token: string;
+    refreshToken?: string;
+    user: UserProfile;
+    connectionCode?: { code: string; expiresAt: string };
+    linkedPatient?: UserProfile;
+  }>('/api/auth/signup', {
     method: 'POST',
     body: JSON.stringify(data),
   });
