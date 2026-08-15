@@ -89,7 +89,7 @@ export interface CareScoreBreakdown {
   activityScore: number;
   routineScore: number;
   totalScore: number;
-  weeklyScores?: { day: string; score: number }[];
+  weeklyScores: { day: string; score: number }[];
 }
 
 export interface RoutineInsight {

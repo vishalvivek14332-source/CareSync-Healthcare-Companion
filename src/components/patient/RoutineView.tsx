@@ -1,19 +1,39 @@
 import React from 'react';
 import { useCareSync } from '../../context/CareSyncContext';
 import { CareScoreRing } from '../common/CareScoreRing';
-import { Activity, ShieldCheck, AlertCircle, Info, Sparkles, CheckCircle2, TrendingUp, HeartHandshake } from 'lucide-react';
+import { ShieldCheck, AlertCircle, Info, Sparkles, CheckCircle2, TrendingUp, HeartHandshake } from 'lucide-react';
+
+const defaultWeeklyScores = [
+  { day: 'Mon', score: 100 },
+  { day: 'Tue', score: 100 },
+  { day: 'Wed', score: 100 },
+  { day: 'Thu', score: 100 },
+  { day: 'Fri', score: 100 },
+  { day: 'Sat', score: 100 },
+  { day: 'Sun', score: 100 },
+];
 
 export const RoutineView: React.FC = () => {
   const { careScore, insights, medications, hydration, activity, routineItems } = useCareSync();
 
-  const takenMeds = medications ? medications.filter((m) => m.status === 'taken').length : 0;
-  const totalMeds = medications ? medications.length : 0;
+  const takenMeds = Array.isArray(medications) ? medications.filter((m) => m.status === 'taken').length : 0;
+  const totalMeds = Array.isArray(medications) ? medications.length : 0;
   const currentLiters = hydration?.currentLiters || 0;
   const goalLiters = hydration?.goalLiters || 2.0;
   const currentSteps = activity?.steps || 0;
   const goalSteps = activity?.stepGoal || 5000;
-  const completedRoutines = routineItems ? routineItems.filter((r) => r.completed).length : 0;
-  const totalRoutines = routineItems ? routineItems.length : 0;
+  const completedRoutines = Array.isArray(routineItems) ? routineItems.filter((r) => r.completed).length : 0;
+  const totalRoutines = Array.isArray(routineItems) ? routineItems.length : 0;
+
+  const weeklyScoresList = Array.isArray(careScore?.weeklyScores) && careScore.weeklyScores.length > 0
+    ? careScore.weeklyScores
+    : defaultWeeklyScores;
+
+  const insightsList = Array.isArray(insights) ? insights : [];
+
+  const averageScore = Math.round(
+    weeklyScoresList.reduce((acc, curr) => acc + (curr.score || 0), 0) / weeklyScoresList.length
+  );
 
   return (
     <div className="space-y-6 pb-20">
@@ -90,17 +110,17 @@ export const RoutineView: React.FC = () => {
             Weekly CareScore Stability
           </h2>
           <span className="text-xs font-bold text-teal-700 bg-teal-50 px-3 py-1 rounded-full border border-teal-200">
-            7-Day Average: 86 / 100
+            7-Day Average: {averageScore} / 100
           </span>
         </div>
 
         <div className="grid grid-cols-7 gap-2 pt-2 text-center">
-          {careScore.weeklyScores.map((item, idx) => (
+          {weeklyScoresList.map((item, idx) => (
             <div key={idx} className="flex flex-col items-center gap-2">
               <div className="w-full h-28 bg-slate-100 rounded-xl p-1 flex items-end">
                 <div
                   className="w-full bg-gradient-to-t from-teal-700 to-teal-500 rounded-lg transition-all duration-500"
-                  style={{ height: `${item.score}%` }}
+                  style={{ height: `${Math.max(8, item.score)}%` }}
                 />
               </div>
               <span className="text-xs font-bold text-slate-700">{item.day}</span>
@@ -121,32 +141,38 @@ export const RoutineView: React.FC = () => {
         </div>
 
         <div className="space-y-3">
-          {insights.map((ins) => {
-            let borderCol = 'border-slate-200 bg-slate-50';
-            let icon = <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0" />;
+          {insightsList.length === 0 ? (
+            <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200 text-xs text-slate-500 text-center">
+              No routine observations yet. As you confirm medications and log water, insights will appear here.
+            </div>
+          ) : (
+            insightsList.map((ins) => {
+              let borderCol = 'border-slate-200 bg-slate-50';
+              let icon = <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0" />;
 
-            if (ins.type === 'warning') {
-              borderCol = 'border-amber-200 bg-amber-50/60';
-              icon = <AlertCircle className="w-5 h-5 text-amber-600 shrink-0" />;
-            } else if (ins.type === 'info') {
-              borderCol = 'border-sky-200 bg-sky-50/60';
-              icon = <Info className="w-5 h-5 text-sky-600 shrink-0" />;
-            }
+              if (ins.type === 'warning') {
+                borderCol = 'border-amber-200 bg-amber-50/60';
+                icon = <AlertCircle className="w-5 h-5 text-amber-600 shrink-0" />;
+              } else if (ins.type === 'info') {
+                borderCol = 'border-sky-200 bg-sky-50/60';
+                icon = <Info className="w-5 h-5 text-sky-600 shrink-0" />;
+              }
 
-            return (
-              <div
-                key={ins.id}
-                className={`p-4 rounded-2xl border ${borderCol} flex items-start gap-3 text-xs leading-relaxed`}
-              >
-                {icon}
-                <div className="space-y-1">
-                  <div className="font-bold text-slate-900 text-sm">{ins.title}</div>
-                  <p className="text-slate-600">{ins.description}</p>
-                  <span className="text-[10px] text-slate-400 font-medium block pt-1">{ins.timestamp}</span>
+              return (
+                <div
+                  key={ins.id}
+                  className={`p-4 rounded-2xl border ${borderCol} flex items-start gap-3 text-xs leading-relaxed`}
+                >
+                  {icon}
+                  <div className="space-y-1">
+                    <div className="font-bold text-slate-900 text-sm">{ins.title}</div>
+                    <p className="text-slate-600">{ins.description || ins.message}</p>
+                    <span className="text-[10px] text-slate-400 font-medium block pt-1">{ins.timestamp || 'Today'}</span>
+                  </div>
                 </div>
-              </div>
-            );
-          })}
+              );
+            })
+          )}
         </div>
 
         {/* NON-DIAGNOSTIC DISCLAIMER */}

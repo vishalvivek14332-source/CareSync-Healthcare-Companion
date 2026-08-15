@@ -959,6 +959,15 @@ export const CareSyncProvider: React.FC<{ children: ReactNode }> = ({ children }
       hydrationScore: currentLiters > 0 ? hydrationScore : (totalWeights === 0 ? 100 : 0),
       activityScore: steps > 0 ? stepScore : (totalWeights === 0 ? 100 : 0),
       routineScore: routineTotal > 0 ? routineScore : 100,
+      weeklyScores: [
+        { day: 'Mon', score: totalScore },
+        { day: 'Tue', score: totalScore },
+        { day: 'Wed', score: totalScore },
+        { day: 'Thu', score: totalScore },
+        { day: 'Fri', score: totalScore },
+        { day: 'Sat', score: totalScore },
+        { day: 'Sun', score: totalScore },
+      ],
     };
   };
 
@@ -970,6 +979,9 @@ export const CareSyncProvider: React.FC<{ children: ReactNode }> = ({ children }
       type: 'encouragement',
       title: 'Daily Care Overview',
       message: 'Your health rhythms and schedule synchronize with your care team in real-time.',
+      description: 'Your health rhythms and schedule synchronize with your care team in real-time.',
+      timestamp: 'Today',
+      isDiagnostic: false,
     },
   ];
 
