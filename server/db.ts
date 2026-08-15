@@ -312,6 +312,27 @@ export async function runPostgresMigrations(client: PoolClient | Pool) {
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
     CREATE INDEX IF NOT EXISTS idx_device_tokens_user ON device_push_tokens(user_id);
+
+    -- HYDRATION SCHEDULES TABLE (multi-slot specific reminder times)
+    CREATE TABLE IF NOT EXISTS hydration_schedules (
+      id VARCHAR(64) PRIMARY KEY,
+      patient_id VARCHAR(64) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      scheduled_time VARCHAR(32) NOT NULL,
+      amount_ml INTEGER NOT NULL DEFAULT 250,
+      repeat_days VARCHAR(64) NOT NULL DEFAULT 'daily',
+      enabled INTEGER NOT NULL DEFAULT 1,
+      start_date VARCHAR(32),
+      end_date VARCHAR(32),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_hydration_sched_patient ON hydration_schedules(patient_id, enabled);
+
+    -- Recurrence fields on medications
+    ALTER TABLE medications ADD COLUMN IF NOT EXISTS start_date VARCHAR(32);
+    ALTER TABLE medications ADD COLUMN IF NOT EXISTS end_date VARCHAR(32);
+    ALTER TABLE medications ADD COLUMN IF NOT EXISTS repeat_pattern VARCHAR(32) DEFAULT 'daily';
+    ALTER TABLE medications ADD COLUMN IF NOT EXISTS days_of_week VARCHAR(128) DEFAULT 'all';
   `);
 }
 
@@ -533,11 +554,31 @@ export async function initDb() {
       updated_at TEXT NOT NULL DEFAULT (datetime('now')),
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     );
+
+    CREATE TABLE IF NOT EXISTS hydration_schedules (
+      id TEXT PRIMARY KEY,
+      patient_id TEXT NOT NULL,
+      scheduled_time TEXT NOT NULL,
+      amount_ml INTEGER NOT NULL DEFAULT 250,
+      repeat_days TEXT NOT NULL DEFAULT 'daily',
+      enabled INTEGER NOT NULL DEFAULT 1,
+      start_date TEXT,
+      end_date TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY (patient_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_hydration_sched_patient ON hydration_schedules(patient_id, enabled);
   `);
 
   // Auto-migrate SQLite missing columns if db existed before
   try { sqliteDb.exec("ALTER TABLE users ADD COLUMN timezone TEXT DEFAULT 'UTC'"); } catch (e) {}
   try { sqliteDb.exec("ALTER TABLE medications ADD COLUMN timezone TEXT DEFAULT 'UTC'"); } catch (e) {}
+  try { sqliteDb.exec("ALTER TABLE medications ADD COLUMN updated_at TEXT"); } catch (e) {}
+  try { sqliteDb.exec("ALTER TABLE medications ADD COLUMN start_date TEXT"); } catch (e) {}
+  try { sqliteDb.exec("ALTER TABLE medications ADD COLUMN end_date TEXT"); } catch (e) {}
+  try { sqliteDb.exec("ALTER TABLE medications ADD COLUMN repeat_pattern TEXT DEFAULT 'daily'"); } catch (e) {}
+  try { sqliteDb.exec("ALTER TABLE medications ADD COLUMN days_of_week TEXT DEFAULT 'all'"); } catch (e) {}
   try { sqliteDb.exec("ALTER TABLE hydration_settings ADD COLUMN timezone TEXT DEFAULT 'UTC'"); } catch (e) {}
 
   seedDefaultDemoDataIfEmpty();

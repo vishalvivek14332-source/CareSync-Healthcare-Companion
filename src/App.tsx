@@ -7,8 +7,10 @@ import { SOSModal } from './components/common/SOSModal';
 import { OnboardingModal } from './components/common/OnboardingModal';
 import { AssistantDrawer } from './components/assistant/AssistantDrawer';
 import { AuthLandingView } from './components/auth/AuthLandingView';
+import { AlarmModal } from './components/common/AlarmModal';
 import { ErrorBoundary } from './components/common/ErrorBoundary';
-import { WifiOff } from 'lucide-react';
+import { WifiOff, HeartPulse } from 'lucide-react';
+import { motion } from 'motion/react';
 
 // Patient Views
 import { PatientHomeView } from './components/patient/PatientHomeView';
@@ -52,10 +54,59 @@ const OfflineBanner: React.FC = () => {
   );
 };
 
-const MainContent: React.FC = () => {
-  const { isAuthenticated, currentUser, activeRole, activePatientTab, activeCaregiverTab } = useCareSync();
+const CareSyncSplashScreen: React.FC = () => (
+  <div className="min-h-screen bg-gradient-to-b from-slate-900 via-teal-950 to-slate-950 flex flex-col items-center justify-center p-6 text-white text-center select-none">
+    <motion.div
+      initial={{ scale: 0.85, opacity: 0 }}
+      animate={{ scale: 1, opacity: 1 }}
+      transition={{ duration: 0.5, ease: 'easeOut' }}
+      className="space-y-6 flex flex-col items-center"
+    >
+      <div className="relative">
+        <div className="w-24 h-24 rounded-3xl bg-teal-600/30 border border-teal-400/40 flex items-center justify-center shadow-2xl backdrop-blur-md">
+          <HeartPulse className="w-12 h-12 text-teal-300 animate-pulse" />
+        </div>
+        <div className="absolute -inset-2 bg-teal-500/20 rounded-3xl blur-xl -z-10 animate-pulse" />
+      </div>
 
-  // If user is not authenticated, display First-Launch Role Selection and Auth view
+      <div className="space-y-1">
+        <h1 className="text-3xl font-extrabold tracking-tight bg-gradient-to-r from-white via-teal-100 to-teal-300 bg-clip-text text-transparent">
+          CareSync
+        </h1>
+        <p className="text-teal-200/70 text-xs font-semibold uppercase tracking-widest">
+          Healthcare Companion
+        </p>
+      </div>
+
+      <div className="flex items-center gap-2 text-xs text-teal-300/80 font-medium pt-4">
+        <div className="w-2 h-2 rounded-full bg-teal-400 animate-ping" />
+        <span>Restoring your secure session...</span>
+      </div>
+    </motion.div>
+  </div>
+);
+
+const MainContent: React.FC = () => {
+  const {
+    isAuthenticated,
+    isAuthLoading,
+    currentUser,
+    activeRole,
+    activePatientTab,
+    activeCaregiverTab,
+    activeAlarm,
+    confirmAlarmTaken,
+    confirmAlarmDrank,
+    snoozeActiveAlarm,
+    dismissActiveAlarm,
+  } = useCareSync();
+
+  // 1. If session is currently bootstrapping, show loading screen
+  if (isAuthLoading) {
+    return <CareSyncSplashScreen />;
+  }
+
+  // 2. If user is genuinely unauthenticated, display First-Launch / Auth Landing View
   if (!isAuthenticated || !currentUser) {
     return (
       <div className="min-h-screen bg-slate-100/70 text-slate-900 font-sans selection:bg-teal-500 selection:text-white">
@@ -123,6 +174,15 @@ const MainContent: React.FC = () => {
       <SOSModal />
       <OnboardingModal />
       <ToastContainer />
+
+      {/* Fullscreen/Prominent Alarm Modal */}
+      <AlarmModal
+        alarm={activeAlarm}
+        onTaken={confirmAlarmTaken}
+        onDrank={confirmAlarmDrank}
+        onSnooze={snoozeActiveAlarm}
+        onDismiss={dismissActiveAlarm}
+      />
     </div>
   );
 };

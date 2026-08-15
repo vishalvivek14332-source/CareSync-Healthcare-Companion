@@ -17,12 +17,28 @@ export interface Medication {
   takenAt?: string;
   category: 'morning' | 'afternoon' | 'evening';
   color: string;
+  startDate?: string;    // e.g. "2026-09-01"
+  endDate?: string;      // e.g. "2026-09-30"
+  repeatPattern?: 'daily' | 'weekdays' | 'weekends' | 'custom';
+  daysOfWeek?: string[]; // e.g. ['Mon', 'Wed', 'Fri']
+  active?: number;
 }
 
 export interface HydrationLog {
   id: string;
   amountMl: number;
   timestamp: string;
+}
+
+export interface HydrationSchedule {
+  id: string;
+  patientId?: string;
+  scheduledTime: string; // e.g. "08:00" or "08:00 AM"
+  amountMl: number;      // e.g. 250
+  repeatDays: string;    // 'daily' | 'weekdays' | 'weekends'
+  enabled: boolean;
+  startDate?: string;
+  endDate?: string;
 }
 
 export interface HydrationSettings {
@@ -41,6 +57,7 @@ export interface HydrationState {
   nextReminderTime: string;
   hourlyTrends: { hour: string; liters: number }[];
   settings?: HydrationSettings;
+  schedules?: HydrationSchedule[];
 }
 
 export interface ActivityState {
@@ -59,7 +76,6 @@ export interface ActivityState {
 
 export interface RoutineItem {
   id: string;
-  patientId?: string;
   title: string;
   time: string;
   completed: boolean;
@@ -68,41 +84,40 @@ export interface RoutineItem {
 }
 
 export interface CareScoreBreakdown {
-  totalScore: number; // 0 - 100
   medicationScore: number;
   hydrationScore: number;
   activityScore: number;
   routineScore: number;
-  weeklyScores: { day: string; score: number }[];
-  isNewSetup?: boolean;
+  totalScore: number;
+  weeklyScores?: { day: string; score: number }[];
 }
 
 export interface RoutineInsight {
   id: string;
-  type: 'positive' | 'warning' | 'info';
+  type: 'encouragement' | 'warning' | 'tip' | 'info' | 'positive';
   title: string;
-  description: string;
-  timestamp: string;
-  isDiagnostic: false;
+  message?: string;
+  description?: string;
+  timestamp?: string;
+  actionText?: string;
+  isDiagnostic?: boolean;
 }
-
-export type AlertSeverity = 'low' | 'medium' | 'high' | 'emergency';
 
 export interface AlertItem {
   id: string;
   patientId: string;
   patientName: string;
-  type: 'medication_reminder' | 'missed_medication' | 'hydration_low' | 'routine_insight' | 'inactivity_alert';
-  severity: AlertSeverity;
+  type: 'missed_medication' | 'low_hydration' | 'inactivity' | 'irregular_routine';
+  severity: 'low' | 'medium' | 'high' | 'emergency';
   title: string;
   description: string;
   timestamp: string;
   reviewed: boolean;
-  actionText?: string;
+  actionText: string;
 }
 
 export interface EscalationLevel {
-  level: 1 | 2 | 3 | 4;
+  level: number;
   title: string;
   target: string;
   delayMinutes: number;
@@ -118,8 +133,8 @@ export interface EscalationRules {
   emergencyContactName: string;
   emergencyContactPhone: string;
   emergencyContactRelation: string;
-  quietHoursStart: string; // "22:00"
-  quietHoursEnd: string; // "07:00"
+  quietHoursStart: string;
+  quietHoursEnd: string;
   maxRemindersBeforeEscalation: number;
   repeatReminderIntervalMinutes: number;
 }
@@ -129,14 +144,8 @@ export interface NotificationItem {
   title: string;
   description: string;
   timestamp: string;
-  type: 'reminder' | 'alert' | 'system' | 'caregiver';
+  type: 'reminder' | 'alert' | 'system' | 'caregiver' | 'emergency';
   read: boolean;
-}
-
-export interface ConnectionCodeInfo {
-  code: string;
-  expiresAt: string;
-  createdAt?: string;
 }
 
 export interface UserProfile {
@@ -155,13 +164,19 @@ export interface UserProfile {
   quietHours?: string;
   medicationCount?: number;
   lastActive?: string;
-  status?: 'normal' | 'attention' | 'alert';
+  status?: string;
 }
 
 export interface ChatMessage {
   id: string;
-  sender: 'assistant' | 'user';
+  sender: 'user' | 'assistant';
   text: string;
   timestamp: string;
   suggestedActions?: string[];
+}
+
+export interface ConnectionCodeInfo {
+  code: string;
+  expiresAt: string;
+  createdAt?: string;
 }

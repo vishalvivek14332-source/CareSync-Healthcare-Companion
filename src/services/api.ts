@@ -2,6 +2,7 @@ import {
   Medication,
   HydrationState,
   HydrationSettings,
+  HydrationSchedule,
   ActivityState,
   AlertItem,
   EscalationRules,
@@ -31,7 +32,9 @@ export class ApiError extends Error {
   }
 }
 
-// In-memory token storage (with localStorage fallback for PWA/Web)
+// -----------------------------------------------------------------------------
+// TOKEN & USER STORAGE (Synchronous Memory + Persistent Storage)
+// -----------------------------------------------------------------------------
 let accessToken: string | null = typeof window !== 'undefined' && window.localStorage ? localStorage.getItem('caresync_token') : null;
 let refreshToken: string | null = typeof window !== 'undefined' && window.localStorage ? localStorage.getItem('caresync_refresh_token') : null;
 
@@ -68,6 +71,30 @@ export function getRefreshToken(): string | null {
   if (refreshToken) return refreshToken;
   if (typeof window !== 'undefined' && window.localStorage) {
     return localStorage.getItem('caresync_refresh_token');
+  }
+  return null;
+}
+
+export function setCachedUser(user: UserProfile | null) {
+  if (typeof window !== 'undefined' && window.localStorage) {
+    if (user) {
+      localStorage.setItem('caresync_user', JSON.stringify(user));
+    } else {
+      localStorage.removeItem('caresync_user');
+    }
+  }
+}
+
+export function getCachedUser(): UserProfile | null {
+  if (typeof window !== 'undefined' && window.localStorage) {
+    const raw = localStorage.getItem('caresync_user');
+    if (raw) {
+      try {
+        return JSON.parse(raw) as UserProfile;
+      } catch {
+        return null;
+      }
+    }
   }
   return null;
 }
@@ -150,36 +177,103 @@ export async function checkServerHealthApi(testUrl?: string): Promise<{ ok: bool
 let isRefreshing = false;
 let refreshPromise: Promise<string | null> | null = null;
 
-async function performTokenRefresh(): Promise<string | null> {
+export async function performTokenRefresh(): Promise<string | null> {
   const currentRefresh = getRefreshToken();
   if (!currentRefresh) {
     clearAuthTokens();
     return null;
   }
 
-  try {
-    const base = getApiBaseUrl();
-    const res = await fetch(`${base}/api/auth/refresh`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-      body: JSON.stringify({ refreshToken: currentRefresh }),
-    });
+  if (isRefreshing && refreshPromise) {
+    return refreshPromise;
+  }
 
-    if (!res.ok) {
+  isRefreshing = true;
+  refreshPromise = (async () => {
+    try {
+      const base = getApiBaseUrl();
+      const res = await fetch(`${base}/api/auth/refresh`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify({ refreshToken: currentRefresh }),
+      });
+
+      if (!res.ok) {
+        clearAuthTokens();
+        return null;
+      }
+
+      const data = await res.json();
+      if (data?.token) {
+        setAuthToken(data.token, data.refreshToken);
+        if (data.user) {
+          setCachedUser(data.user);
+        }
+        return data.token;
+      }
       clearAuthTokens();
       return null;
+    } catch {
+      return null;
+    } finally {
+      isRefreshing = false;
+      refreshPromise = null;
     }
+  })();
 
-    const data = await res.json();
-    if (data?.token) {
-      setAuthToken(data.token, data.refreshToken);
-      return data.token;
-    }
-    clearAuthTokens();
-    return null;
-  } catch {
+  return refreshPromise;
+}
+
+// -----------------------------------------------------------------------------
+// AUTHENTICATION BOOTSTRAP HELPER (Restores or Refreshes Session)
+// -----------------------------------------------------------------------------
+export async function initAuthSession(): Promise<{ token: string; user: UserProfile; connectionCode?: any } | null> {
+  const token = getAuthToken();
+  const refresh = getRefreshToken();
+  const cachedUser = getCachedUser();
+
+  if (!token && !refresh) {
     return null;
   }
+
+  // 1. Try to fetch /api/auth/me with existing access token
+  if (token) {
+    try {
+      const res = await fetchCurrentUserApi();
+      if (res?.user) {
+        setCachedUser(res.user);
+        return { token, user: res.user, connectionCode: res.connectionCode };
+      }
+    } catch (err: any) {
+      if (err.type === 'OFFLINE' || err.type === 'NETWORK_ERROR' || err.type === 'TIMEOUT') {
+        if (cachedUser) {
+          return { token, user: cachedUser };
+        }
+      }
+    }
+  }
+
+  // 2. Access token was expired or rejected, try rotating refresh token
+  if (refresh) {
+    const newToken = await performTokenRefresh();
+    if (newToken) {
+      try {
+        const res = await fetchCurrentUserApi();
+        if (res?.user) {
+          setCachedUser(res.user);
+          return { token: newToken, user: res.user, connectionCode: res.connectionCode };
+        }
+      } catch (err: any) {
+        if (cachedUser) {
+          return { token: newToken, user: cachedUser };
+        }
+      }
+    }
+  }
+
+  // Session completely invalid or revoked
+  clearAuthTokens();
+  return null;
 }
 
 // -----------------------------------------------------------------------------
@@ -232,8 +326,7 @@ export async function flushOfflineQueue(): Promise<{ syncedCount: number; failed
         remainingQueue.push(item);
         failedCount++;
       } else {
-        // Business logic or validation error (e.g. dose already confirmed), discard to prevent infinite loop
-        console.warn(`[OfflineQueue] Dropping invalid/expired action ${item.id}:`, err.message);
+        console.warn(`[OfflineQueue] Dropping action ${item.id}:`, err.message);
       }
     }
   }
@@ -250,73 +343,46 @@ async function request<T>(endpoint: string, options: RequestInit = {}, isRetry: 
     throw new ApiError('You appear to be offline. Please check your internet connection.', 'OFFLINE');
   }
 
-  const baseUrl = getApiBaseUrl();
+  const base = getApiBaseUrl();
+  const url = `${base}${endpoint.startsWith('/') ? endpoint : `/${endpoint}`}`;
 
-  // NATIVE ANDROID PROTECTION: If running on native without a configured backend URL, prevent calling WebView origin
-  if (isCapacitorNative() && !baseUrl && !endpoint.startsWith('http://') && !endpoint.startsWith('https://')) {
-    throw new ApiError(
-      'CareSync Android requires a configured HTTPS API URL (VITE_API_URL). Please configure server settings in app.',
-      'CONFIGURATION_ERROR'
-    );
-  }
-
-  const token = getAuthToken();
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     Accept: 'application/json',
-    ...(options.headers as Record<string, string>),
+    ...(options.headers as Record<string, string> || {}),
   };
 
-  if (token) {
-    headers['Authorization'] = `Bearer ${token}`;
+  const currentToken = getAuthToken();
+  if (currentToken && !headers['Authorization']) {
+    headers['Authorization'] = `Bearer ${currentToken}`;
   }
-
-  const url = endpoint.startsWith('http://') || endpoint.startsWith('https://')
-    ? endpoint
-    : `${baseUrl}${endpoint}`;
 
   let response: Response;
   try {
     const controller = new AbortController();
-    const timeoutTimer = setTimeout(() => controller.abort(), 12000);
+    const timeoutId = setTimeout(() => controller.abort(), 12000);
+
     response = await fetch(url, {
       ...options,
       headers,
-      signal: options.signal || controller.signal,
+      signal: controller.signal,
     });
-    clearTimeout(timeoutTimer);
-  } catch (netErr: any) {
-    if (netErr.name === 'AbortError') {
-      throw new ApiError('Request timed out while connecting to CareSync server.', 'TIMEOUT');
+    clearTimeout(timeoutId);
+  } catch (err: any) {
+    if (err.name === 'AbortError') {
+      throw new ApiError('Network request timed out. Please try again.', 'TIMEOUT');
     }
-    throw new ApiError('CareSync server is temporarily unreachable. Please check your internet connection and try again.', 'NETWORK_ERROR');
+    if (typeof navigator !== 'undefined' && !navigator.onLine) {
+      throw new ApiError('Network connection lost.', 'OFFLINE');
+    }
+    throw new ApiError(err.message || 'Unable to reach the CareSync server.', 'NETWORK_ERROR');
   }
 
-  // 401 INTERCEPTOR: Automatically attempt token refresh once
+  // Handle Token Expiry & Automatic Refresh (401 Unauthorized)
   if (response.status === 401 && !isRetry && !endpoint.includes('/api/auth/login') && !endpoint.includes('/api/auth/signup') && !endpoint.includes('/api/auth/refresh')) {
-    if (!isRefreshing) {
-      isRefreshing = true;
-      refreshPromise = performTokenRefresh().finally(() => {
-        isRefreshing = false;
-        refreshPromise = null;
-      });
-    }
-
-    const newToken = await refreshPromise;
+    const newToken = await performTokenRefresh();
     if (newToken) {
       return request<T>(endpoint, options, true);
-    } else {
-      throw new ApiError('Your session has expired. Please sign in again.', 'AUTH_ERROR', 401, 'SESSION_EXPIRED');
-    }
-  }
-
-  const contentType = response.headers.get('content-type') || '';
-
-  // Intercept HTML pages safely
-  if (contentType.includes('text/html')) {
-    const htmlSnippet = await response.text();
-    if (htmlSnippet.includes('<!doctype') || htmlSnippet.includes('<html')) {
-      throw new ApiError('Backend server is temporarily unavailable or misconfigured. Please verify server status.', 'SERVER_ERROR', response.status);
     }
   }
 
@@ -360,6 +426,7 @@ export async function signupApi(data: {
     body: JSON.stringify(data),
   });
   setAuthToken(res.token, res.refreshToken);
+  setCachedUser(res.user);
   return res;
 }
 
@@ -369,6 +436,7 @@ export async function loginApi(email: string, password: string) {
     body: JSON.stringify({ email, password }),
   });
   setAuthToken(data.token, data.refreshToken);
+  setCachedUser(data.user);
   return data;
 }
 
@@ -389,6 +457,7 @@ export async function switchDemoUserApi(role: 'patient' | 'caregiver') {
     body: JSON.stringify({ role }),
   });
   setAuthToken(data.token, data.refreshToken);
+  setCachedUser(data.user);
   return data;
 }
 
@@ -425,8 +494,11 @@ export async function revokeConnectionCodeApi(): Promise<{ success: boolean; rev
 // -----------------------------------------------------------------------------
 // MEDICATIONS APIS
 // -----------------------------------------------------------------------------
-export async function fetchMedicationsApi(patientId?: string): Promise<Medication[]> {
-  const query = patientId ? `?patientId=${patientId}` : '';
+export async function fetchMedicationsApi(patientId?: string, date?: string): Promise<Medication[]> {
+  const params = new URLSearchParams();
+  if (patientId) params.append('patientId', patientId);
+  if (date) params.append('date', date);
+  const query = params.toString() ? `?${params.toString()}` : '';
   return request<Medication[]>(`/api/medications${query}`);
 }
 
@@ -450,18 +522,18 @@ export async function deleteMedicationApi(id: string): Promise<{ message: string
   });
 }
 
-export async function logMedicationDoseApi(id: string, status: 'taken' | 'snoozed', takenAt?: string) {
+export async function logMedicationDoseApi(id: string, status: 'taken' | 'snoozed', takenAt?: string, scheduledDate?: string) {
   try {
-    return await request<{ success: boolean; medicationId: string; status: string }>(`/api/medications/${id}/log`, {
+    return await request<{ success: boolean; medicationId: string; status: string; takenAt?: string }>(`/api/medications/${id}/log`, {
       method: 'POST',
-      body: JSON.stringify({ status, takenAt }),
+      body: JSON.stringify({ status, takenAt, scheduledDate }),
     });
   } catch (err: any) {
     if (err.type === 'OFFLINE' || err.type === 'NETWORK_ERROR') {
       queueOfflineAction({
         type: 'log_medication',
         endpoint: `/api/medications/${id}/log`,
-        payload: { status, takenAt },
+        payload: { status, takenAt, scheduledDate },
       });
     }
     throw err;
@@ -485,6 +557,31 @@ export async function updateHydrationSettingsApi(settings: Partial<HydrationSett
   return request<{ success: boolean; settings: HydrationSettings }>('/api/hydration/settings', {
     method: 'PUT',
     body: JSON.stringify(settings),
+  });
+}
+
+export async function fetchHydrationSchedulesApi(patientId?: string): Promise<HydrationSchedule[]> {
+  const query = patientId ? `?patientId=${patientId}` : '';
+  return request<HydrationSchedule[]>(`/api/hydration/schedules${query}`);
+}
+
+export async function createHydrationScheduleApi(schedule: Partial<HydrationSchedule> & { patientId?: string }): Promise<HydrationSchedule> {
+  return request<HydrationSchedule>('/api/hydration/schedules', {
+    method: 'POST',
+    body: JSON.stringify(schedule),
+  });
+}
+
+export async function updateHydrationScheduleApi(id: string, updates: Partial<HydrationSchedule>): Promise<HydrationSchedule> {
+  return request<HydrationSchedule>(`/api/hydration/schedules/${id}`, {
+    method: 'PUT',
+    body: JSON.stringify(updates),
+  });
+}
+
+export async function deleteHydrationScheduleApi(id: string): Promise<{ message: string }> {
+  return request<{ message: string }>(`/api/hydration/schedules/${id}`, {
+    method: 'DELETE',
   });
 }
 

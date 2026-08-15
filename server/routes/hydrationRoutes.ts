@@ -227,3 +227,181 @@ hydrationRouter.post('/log', async (req: AuthenticatedRequest, res: Response) =>
     return res.status(500).json({ error: 'Failed to log water intake' });
   }
 });
+
+// -----------------------------------------------------------------------------
+// HYDRATION SCHEDULES CRUD (Multi-Slot Discrete Reminders)
+// -----------------------------------------------------------------------------
+
+// GET /api/hydration/schedules - Fetch all hydration schedules
+hydrationRouter.get('/schedules', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const patientId = await getAuthorizedPatientId(req, res, req.query.patientId as string);
+    if (!patientId) return;
+
+    const schedules = await queryRows<any>(`
+      SELECT id, patient_id as "patientId", scheduled_time as "scheduledTime",
+             amount_ml as "amountMl", repeat_days as "repeatDays",
+             enabled, start_date as "startDate", end_date as "endDate",
+             created_at as "createdAt", updated_at as "updatedAt"
+      FROM hydration_schedules
+      WHERE patient_id = ?
+      ORDER BY scheduled_time ASC
+    `, [patientId]);
+
+    const formatted = schedules.map((s) => ({
+      id: s.id,
+      patientId: s.patientId,
+      scheduledTime: s.scheduledTime,
+      amountMl: parseInt(s.amountMl, 10) || 250,
+      repeatDays: s.repeatDays || 'daily',
+      enabled: Boolean(s.enabled),
+      startDate: s.startDate || undefined,
+      endDate: s.endDate || undefined,
+    }));
+
+    return res.json(formatted);
+  } catch (err: any) {
+    console.error('Fetch hydration schedules error:', err);
+    return res.status(500).json({ error: 'Failed to fetch hydration schedules' });
+  }
+});
+
+// POST /api/hydration/schedules - Create a new hydration schedule slot
+hydrationRouter.post('/schedules', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const patientId = await getAuthorizedPatientId(req, res, req.body.patientId);
+    if (!patientId) return;
+
+    const { scheduledTime, amountMl = 250, repeatDays = 'daily', enabled = true, startDate, endDate } = req.body;
+
+    if (!scheduledTime || typeof scheduledTime !== 'string') {
+      return res.status(400).json({ error: 'Valid scheduledTime string is required (e.g. "08:00" or "08:00 AM")' });
+    }
+
+    if (amountMl && (typeof amountMl !== 'number' || amountMl <= 0 || amountMl > 3000)) {
+      return res.status(400).json({ error: 'Amount must be between 1 and 3000 ml' });
+    }
+
+    const id = `hyd-sch-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
+    const now = new Date().toISOString();
+
+    await executeSql(`
+      INSERT INTO hydration_schedules (id, patient_id, scheduled_time, amount_ml, repeat_days, enabled, start_date, end_date, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `, [
+      id,
+      patientId,
+      scheduledTime.trim(),
+      amountMl,
+      repeatDays,
+      enabled ? 1 : 0,
+      startDate || null,
+      endDate || null,
+      now,
+      now,
+    ]);
+
+    const created = await queryRow<any>(`
+      SELECT id, patient_id as "patientId", scheduled_time as "scheduledTime",
+             amount_ml as "amountMl", repeat_days as "repeatDays",
+             enabled, start_date as "startDate", end_date as "endDate"
+      FROM hydration_schedules
+      WHERE id = ?
+    `, [id]);
+
+    return res.status(201).json({
+      id: created.id,
+      patientId: created.patientId,
+      scheduledTime: created.scheduledTime,
+      amountMl: parseInt(created.amountMl, 10),
+      repeatDays: created.repeatDays,
+      enabled: Boolean(created.enabled),
+      startDate: created.startDate || undefined,
+      endDate: created.endDate || undefined,
+    });
+  } catch (err: any) {
+    console.error('Create hydration schedule error:', err);
+    return res.status(500).json({ error: 'Failed to create hydration schedule' });
+  }
+});
+
+// PUT /api/hydration/schedules/:id - Update hydration schedule slot
+hydrationRouter.put('/schedules/:id', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const scheduleId = req.params.id;
+    const existing = await queryRow<any>('SELECT * FROM hydration_schedules WHERE id = ?', [scheduleId]);
+    if (!existing) {
+      return res.status(404).json({ error: 'Hydration schedule not found' });
+    }
+
+    const patientId = await getAuthorizedPatientId(req, res, existing.patient_id);
+    if (!patientId) return;
+
+    const { scheduledTime, amountMl, repeatDays, enabled, startDate, endDate } = req.body;
+    const now = new Date().toISOString();
+
+    await executeSql(`
+      UPDATE hydration_schedules
+      SET scheduled_time = COALESCE(?, scheduled_time),
+          amount_ml = COALESCE(?, amount_ml),
+          repeat_days = COALESCE(?, repeat_days),
+          enabled = COALESCE(?, enabled),
+          start_date = COALESCE(?, start_date),
+          end_date = COALESCE(?, end_date),
+          updated_at = ?
+      WHERE id = ?
+    `, [
+      scheduledTime ? scheduledTime.trim() : null,
+      amountMl !== undefined ? Number(amountMl) : null,
+      repeatDays !== undefined ? repeatDays : null,
+      enabled !== undefined ? (enabled ? 1 : 0) : null,
+      startDate !== undefined ? startDate : null,
+      endDate !== undefined ? endDate : null,
+      now,
+      scheduleId,
+    ]);
+
+    const updated = await queryRow<any>(`
+      SELECT id, patient_id as "patientId", scheduled_time as "scheduledTime",
+             amount_ml as "amountMl", repeat_days as "repeatDays",
+             enabled, start_date as "startDate", end_date as "endDate"
+      FROM hydration_schedules
+      WHERE id = ?
+    `, [scheduleId]);
+
+    return res.json({
+      id: updated.id,
+      patientId: updated.patientId,
+      scheduledTime: updated.scheduledTime,
+      amountMl: parseInt(updated.amountMl, 10),
+      repeatDays: updated.repeatDays,
+      enabled: Boolean(updated.enabled),
+      startDate: updated.startDate || undefined,
+      endDate: updated.endDate || undefined,
+    });
+  } catch (err: any) {
+    console.error('Update hydration schedule error:', err);
+    return res.status(500).json({ error: 'Failed to update hydration schedule' });
+  }
+});
+
+// DELETE /api/hydration/schedules/:id - Delete hydration schedule slot
+hydrationRouter.delete('/schedules/:id', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const scheduleId = req.params.id;
+    const existing = await queryRow<any>('SELECT * FROM hydration_schedules WHERE id = ?', [scheduleId]);
+    if (!existing) {
+      return res.status(404).json({ error: 'Hydration schedule not found' });
+    }
+
+    const patientId = await getAuthorizedPatientId(req, res, existing.patient_id);
+    if (!patientId) return;
+
+    await executeSql('DELETE FROM hydration_schedules WHERE id = ?', [scheduleId]);
+    return res.json({ message: 'Hydration schedule deleted successfully' });
+  } catch (err: any) {
+    console.error('Delete hydration schedule error:', err);
+    return res.status(500).json({ error: 'Failed to delete hydration schedule' });
+  }
+});
+
