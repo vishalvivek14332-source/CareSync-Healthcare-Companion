@@ -112,31 +112,55 @@ export function clearAuthTokens() {
 // -----------------------------------------------------------------------------
 // PRODUCTION API BASE URL RESOLUTION
 // -----------------------------------------------------------------------------
+export const DEFAULT_PRODUCTION_API_URL = 'https://caresync-backend-zobp.onrender.com';
+
 export function isCapacitorNative(): boolean {
   return typeof (window as any) !== 'undefined' && typeof (window as any).Capacitor !== 'undefined' && (window as any).Capacitor.isNativePlatform?.();
 }
 
+export function normalizeApiBaseUrl(url?: string | null): string {
+  if (!url || typeof url !== 'string') return '';
+  let cleaned = url.trim().replace(/\/+$/, '');
+  if (cleaned.endsWith('/api')) {
+    cleaned = cleaned.substring(0, cleaned.length - 4);
+  }
+  return cleaned.replace(/\/+$/, '');
+}
+
 export function getApiBaseUrl(): string {
-  // 1. Check custom runtime override (e.g. from developer settings modal in dev mode)
+  // 1. Explicit user-configured runtime override (if present & valid)
   if (typeof window !== 'undefined' && window.localStorage) {
     const customUrl = localStorage.getItem('caresync_api_url');
-    if (customUrl) return customUrl.replace(/\/+$/, '');
+    if (customUrl && typeof customUrl === 'string' && customUrl.trim().length > 0) {
+      const normalized = normalizeApiBaseUrl(customUrl);
+      if (normalized.startsWith('http://') || normalized.startsWith('https://')) {
+        return normalized;
+      }
+    }
   }
 
-  // 2. Build-time environment variable (Production / Staging / CI)
+  // 2. Build-time environment variable VITE_API_URL
   const envUrl = (import.meta as any).env?.VITE_API_URL;
   if (envUrl && typeof envUrl === 'string' && envUrl.trim().length > 0) {
-    return envUrl.trim().replace(/\/+$/, '');
+    const normalized = normalizeApiBaseUrl(envUrl);
+    if (normalized) return normalized;
   }
 
-  // 3. Web/PWA fallback: relative root
-  return '';
+  // 3. Node test environment fallback (detect if running in node/tsx test environment with localhost)
+  if (typeof window === 'undefined' || typeof process !== 'undefined' && process.env?.NODE_ENV === 'test') {
+    if (typeof process !== 'undefined' && process.env?.TEST_API_URL) {
+      return normalizeApiBaseUrl(process.env.TEST_API_URL);
+    }
+  }
+
+  // 4. Native Android / iOS APK or Web Production: Always use official production backend
+  return DEFAULT_PRODUCTION_API_URL;
 }
 
 export function setApiBaseUrl(url: string) {
   if (typeof window !== 'undefined' && window.localStorage) {
     if (url) {
-      localStorage.setItem('caresync_api_url', url.replace(/\/+$/, ''));
+      localStorage.setItem('caresync_api_url', normalizeApiBaseUrl(url));
     } else {
       localStorage.removeItem('caresync_api_url');
     }
@@ -386,18 +410,47 @@ async function request<T>(endpoint: string, options: RequestInit = {}, isRetry: 
     }
   }
 
+  const contentType = response.headers.get('content-type') || '';
+  const isJson = contentType.includes('application/json');
+
   if (!response.ok) {
     let errMessage = `Request failed with status ${response.status}`;
     let errCode: string | undefined;
-    try {
-      const errData = await response.json();
-      if (errData?.error) errMessage = errData.error;
-      if (errData?.code) errCode = errData.code;
-    } catch {
-      // Body was not JSON
+    if (isJson) {
+      try {
+        const errData = await response.json();
+        if (errData?.error) errMessage = errData.error;
+        if (errData?.code) errCode = errData.code;
+      } catch {
+        // Ignore json parse error
+      }
+    } else {
+      try {
+        const text = await response.text();
+        const snippet = text.slice(0, 100).trim();
+        console.warn(`[CareSync:API] Non-JSON error response (${response.status}): ${snippet}`);
+        errMessage = `CareSync backend returned an unexpected response (Status ${response.status}). Check the configured API server.`;
+      } catch {
+        // ignore text read error
+      }
     }
     const errorType: ApiErrorType = response.status === 401 || response.status === 403 ? 'AUTH_ERROR' : response.status >= 400 && response.status < 500 ? 'VALIDATION_ERROR' : 'SERVER_ERROR';
     throw new ApiError(errMessage, errorType, response.status, errCode);
+  }
+
+  if (!isJson) {
+    try {
+      const text = await response.text();
+      const snippet = text.slice(0, 100).trim();
+      console.warn(`[CareSync:API] Expected JSON but received non-JSON (Content-Type: ${contentType}): ${snippet}`);
+    } catch {
+      // ignore
+    }
+    throw new ApiError(
+      'CareSync backend returned an unexpected response format. Check the configured API server.',
+      'SERVER_ERROR',
+      response.status
+    );
   }
 
   try {

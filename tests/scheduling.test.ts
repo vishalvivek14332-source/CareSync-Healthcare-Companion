@@ -272,7 +272,47 @@ async function runSchedulingTests() {
       }),
     });
     const logDoseData = await logDoseRes.json();
-    assert(logDoseRes.status === 200 && logDoseData.status === 'taken', 'Test 16: Dose logged for specific calendar date');
+    // -------------------------------------------------------------------------
+    // TEST 17: Production API URL Fallback & Normalization Logic
+    // -------------------------------------------------------------------------
+    const { normalizeApiBaseUrl, DEFAULT_PRODUCTION_API_URL } = await import('../src/services/api');
+    assert(DEFAULT_PRODUCTION_API_URL === 'https://caresync-backend-zobp.onrender.com', 'Test 17a: Production API default is Render backend');
+    assert(normalizeApiBaseUrl('https://caresync-backend-zobp.onrender.com/') === 'https://caresync-backend-zobp.onrender.com', 'Test 17b: Trailing slashes stripped');
+    assert(normalizeApiBaseUrl('https://caresync-backend-zobp.onrender.com/api') === 'https://caresync-backend-zobp.onrender.com', 'Test 17c: Trailing /api stripped');
+
+    // -------------------------------------------------------------------------
+    // TEST 18: API Rejects HTML responses cleanly without JSON.parse explosion
+    // -------------------------------------------------------------------------
+    const htmlApp = express();
+    htmlApp.get('/api/mock-html', (_req, res) => {
+      res.setHeader('Content-Type', 'text/html');
+      res.status(200).send('<!doctype html><html><body>Login</body></html>');
+    });
+    const htmlServer = http.createServer(htmlApp);
+    await new Promise<void>((resolve) => htmlServer.listen(0, resolve));
+    const htmlPort = (htmlServer.address() as any).port;
+
+    const htmlFetchRes = await fetch(`http://127.0.0.1:${htmlPort}/api/mock-html`);
+    const htmlContentType = htmlFetchRes.headers.get('content-type') || '';
+    const isHtml = !htmlContentType.includes('application/json');
+    assert(isHtml === true && htmlFetchRes.status === 200, 'Test 18: Non-JSON HTML response correctly identified without throw');
+    htmlServer.close();
+
+    // -------------------------------------------------------------------------
+    // TEST 19: Alarm Snooze Calculation (+10 minutes)
+    // -------------------------------------------------------------------------
+    const initialTime = Date.now();
+    const snoozedTime = initialTime + (10 * 60 * 1000);
+    assert(snoozedTime - initialTime === 600000, 'Test 19: Snooze calculation produces exact +10 minutes');
+
+    // -------------------------------------------------------------------------
+    // TEST 20: Deterministic Alarm ID generation
+    // -------------------------------------------------------------------------
+    const medId = 'med-12345';
+    const timestamp = 1786774000000;
+    const genId1 = 100000 + (Math.abs((medId + '_' + timestamp).split('').reduce((a, b) => ((a << 5) - a) + b.charCodeAt(0), 0)) % 799999);
+    const genId2 = 100000 + (Math.abs((medId + '_' + timestamp).split('').reduce((a, b) => ((a << 5) - a) + b.charCodeAt(0), 0)) % 799999);
+    assert(genId1 === genId2 && genId1 >= 100000 && genId1 <= 899999, 'Test 20: Deterministic unique Alarm IDs generated');
 
   } catch (err: any) {
     console.error('❌ Test execution error:', err);

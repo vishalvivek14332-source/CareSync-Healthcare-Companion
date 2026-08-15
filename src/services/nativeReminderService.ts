@@ -1,12 +1,40 @@
-import { LocalNotifications, ActionPerformed } from '@capacitor/local-notifications';
-import { Capacitor } from '@capacitor/core';
-import { logMedicationDoseApi, logHydrationApi } from './api';
+import { LocalNotifications } from '@capacitor/local-notifications';
+import { Capacitor, registerPlugin } from '@capacitor/core';
+import { logMedicationDoseApi, logHydrationApi, queueOfflineAction } from './api';
 import { Medication, HydrationSchedule, HydrationSettings } from '../types';
 
 export const MEDICATION_ACTION_GROUP = 'MEDICATION_ALARM_ACTIONS';
 export const HYDRATION_ACTION_GROUP = 'HYDRATION_ALARM_ACTIONS';
-export const HYDRATION_NOTIFICATION_CHANNEL = 'hydration-alarms';
-export const MEDICATION_NOTIFICATION_CHANNEL = 'medication-alarms';
+export const HYDRATION_NOTIFICATION_CHANNEL = 'hydration-alarms-v2';
+export const MEDICATION_NOTIFICATION_CHANNEL = 'medication-alarms-v2';
+
+export interface CareSyncNativeAlarmPlugin {
+  scheduleAlarm(options: {
+    id: number;
+    type: 'medication' | 'hydration';
+    title: string;
+    body: string;
+    triggerTime: number; // epoch ms
+    extra?: any;
+  }): Promise<{ success: boolean; id: number; triggerTime: number }>;
+
+  cancelAlarm(options: { id: number }): Promise<{ success: boolean }>;
+  cancelAllAlarms(): Promise<{ success: boolean }>;
+  getPendingAlarms(): Promise<{ alarms: any[]; count: number }>;
+  checkExactAlarmPermission(): Promise<{ canScheduleExactAlarms: boolean; notificationsEnabled: boolean; sdkInt: number }>;
+  openExactAlarmSettings(): Promise<{ success: boolean }>;
+  getPendingActions(): Promise<{ actions: Array<{ id: string; type: string; endpoint: string; payload: any; timestamp: number }> }>;
+  getDiagnostics(): Promise<{
+    notificationPermission: string;
+    exactAlarmPermission: string;
+    batteryOptimization: string;
+    pendingAlarmsCount: number;
+    sdkVersion: number;
+    backendUrl: string;
+  }>;
+}
+
+export const CareSyncNativeAlarm = registerPlugin<CareSyncNativeAlarmPlugin>('CareSyncNativeAlarm');
 
 let isInitialized = false;
 
@@ -42,7 +70,7 @@ export function setWaterConfirmedHandler(handler: WaterConfirmedCallback) {
 }
 
 /**
- * Initialize native Android LocalNotification channels, permissions, and action button listeners.
+ * Initialize native Android Alarm channels, permissions, and sync pending actions from background alarms.
  */
 export async function initNativeNotifications(
   onDoseConfirmed?: DoseConfirmedCallback,
@@ -54,100 +82,38 @@ export async function initNativeNotifications(
   if (onWaterConfirmed) onWaterConfirmedHandler = onWaterConfirmed;
 
   if (isInitialized) return;
+
   if (!Capacitor.isNativePlatform()) {
     console.log('[NativeReminders] Web browser environment. Native Android alarms simulation active.');
     return;
   }
 
   try {
-    // 1. Check and request notification permissions
+    // 1. Request POST_NOTIFICATIONS runtime permission on Android 13+
     const permStatus = await LocalNotifications.checkPermissions();
     if (permStatus.display !== 'granted') {
       await LocalNotifications.requestPermissions();
     }
 
-    // 2. Create high-priority Android alarm channel for medications
-    await LocalNotifications.createChannel({
-      id: MEDICATION_NOTIFICATION_CHANNEL,
-      name: 'Medication Alarms',
-      description: 'High-priority sound and vibration reminders for scheduled medication doses',
-      importance: 5, // IMPORTANCE_HIGH
-      visibility: 1,  // VISIBILITY_PUBLIC
-      sound: 'beep.wav',
-      vibration: true,
-      lights: true,
-      lightColor: '#0F766E',
-    });
+    // 2. Check Exact Alarm Permission
+    try {
+      const exactPerm = await CareSyncNativeAlarm.checkExactAlarmPermission();
+      console.log('[NativeReminders] Exact alarm permission status:', exactPerm);
+    } catch (e) {
+      console.warn('[NativeReminders] CareSyncNativeAlarm plugin check skipped:', e);
+    }
 
-    // 3. Create high-priority hydration alarms channel
-    await LocalNotifications.createChannel({
-      id: HYDRATION_NOTIFICATION_CHANNEL,
-      name: 'Hydration Alarms',
-      description: 'High-priority water intake reminders and hydration goals',
-      importance: 5, // IMPORTANCE_HIGH
-      visibility: 1,
-      sound: 'beep.wav',
-      vibration: true,
-      lights: true,
-      lightColor: '#0284C7',
-    });
+    // 3. Process any offline actions completed while app was closed
+    await syncNativePendingActions();
 
-    // 4. Register Action Types for Medication & Hydration
-    await LocalNotifications.registerActionTypes({
-      types: [
-        {
-          id: MEDICATION_ACTION_GROUP,
-          actions: [
-            {
-              id: 'TAKEN',
-              title: '✓ Confirm Taken',
-              foreground: true,
-            },
-            {
-              id: 'SNOOZE_10',
-              title: '⏰ Snooze (10m)',
-              foreground: false,
-            },
-            {
-              id: 'DISMISS',
-              title: '✕ Dismiss',
-              foreground: false,
-              destructive: true,
-            },
-          ],
-        },
-        {
-          id: HYDRATION_ACTION_GROUP,
-          actions: [
-            {
-              id: 'DRANK',
-              title: '✓ Log Drank',
-              foreground: true,
-            },
-            {
-              id: 'SNOOZE_10',
-              title: '⏰ Snooze (10m)',
-              foreground: false,
-            },
-            {
-              id: 'DISMISS',
-              title: '✕ Dismiss',
-              foreground: false,
-              destructive: true,
-            },
-          ],
-        },
-      ],
-    });
-
-    // 5. Register notification received (foreground) listener
+    // 4. Register Action Listener if LocalNotifications fires
     LocalNotifications.addListener('localNotificationReceived', (notification) => {
-      console.log('[NativeReminders] Notification Received in foreground:', notification);
+      console.log('[NativeReminders] Foreground notification received:', notification);
       const extra = notification.extra || {};
       if (onAlarmTriggeredHandler) {
         onAlarmTriggeredHandler({
           id: String(notification.id),
-          type: extra.type || (notification.channelId === HYDRATION_NOTIFICATION_CHANNEL ? 'hydration' : 'medication'),
+          type: extra.type || 'medication',
           title: notification.title,
           subtitle: notification.body,
           scheduledTime: extra.scheduledTime || 'Now',
@@ -158,106 +124,49 @@ export async function initNativeNotifications(
       }
     });
 
-    // 6. Register action button tap listeners
-    LocalNotifications.addListener('localNotificationActionPerformed', async (action: ActionPerformed) => {
-      console.log('[NativeReminders] Notification Action Performed:', action.actionId, action.notification);
-      const extra = action.notification.extra || {};
-      const type = extra.type || (action.notification.channelId === HYDRATION_NOTIFICATION_CHANNEL ? 'hydration' : 'medication');
-
-      if (type === 'medication') {
-        const medicationId = extra.medicationId || 'm-1';
-
-        if (action.actionId === 'TAKEN' || action.actionId === 'tap') {
-          if (action.actionId === 'TAKEN') {
-            try {
-              const nowTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-              await logMedicationDoseApi(medicationId, 'taken', nowTime);
-              if (onDoseConfirmedHandler) onDoseConfirmedHandler(medicationId);
-            } catch (err) {
-              console.error('[NativeReminders] Failed to log TAKEN action:', err);
-            }
-          } else if (onAlarmTriggeredHandler) {
-            onAlarmTriggeredHandler({
-              id: String(action.notification.id),
-              type: 'medication',
-              title: action.notification.title,
-              subtitle: action.notification.body,
-              scheduledTime: extra.scheduledTime || 'Now',
-              dosageOrAmount: extra.dosage || 'Prescribed dose',
-              instructions: extra.instructions,
-              extra,
-            });
-          }
-        } else if (action.actionId === 'SNOOZE_10') {
-          const snoozeTime = new Date(Date.now() + 10 * 60 * 1000);
-          const snoozeId = Math.floor(Math.random() * 100000);
-          await LocalNotifications.schedule({
-            notifications: [
-              {
-                title: '🔔 Medication Time (Snoozed)',
-                body: action.notification.body,
-                id: snoozeId,
-                schedule: { at: snoozeTime, allowWhileIdle: true },
-                sound: 'beep.wav',
-                actionTypeId: MEDICATION_ACTION_GROUP,
-                extra,
-                channelId: MEDICATION_NOTIFICATION_CHANNEL,
-              },
-            ],
-          });
-        }
-      } else if (type === 'hydration') {
-        const amountMl = extra.amountMl || 250;
-
-        if (action.actionId === 'DRANK') {
-          try {
-            await logHydrationApi(amountMl);
-            if (onWaterConfirmedHandler) onWaterConfirmedHandler(amountMl);
-          } catch (err) {
-            console.error('[NativeReminders] Failed to log DRANK action:', err);
-          }
-        } else if (action.actionId === 'tap') {
-          if (onAlarmTriggeredHandler) {
-            onAlarmTriggeredHandler({
-              id: String(action.notification.id),
-              type: 'hydration',
-              title: action.notification.title,
-              subtitle: action.notification.body,
-              scheduledTime: extra.scheduledTime || 'Now',
-              dosageOrAmount: `${amountMl} ml`,
-              extra,
-            });
-          }
-        } else if (action.actionId === 'SNOOZE_10') {
-          const snoozeTime = new Date(Date.now() + 10 * 60 * 1000);
-          const snoozeId = 900000 + Math.floor(Math.random() * 9999);
-          await LocalNotifications.schedule({
-            notifications: [
-              {
-                title: '💧 Hydration Break (Snoozed)',
-                body: `Stay refreshed! Drink ${amountMl} ml of water.`,
-                id: snoozeId,
-                schedule: { at: snoozeTime, allowWhileIdle: true },
-                sound: 'beep.wav',
-                actionTypeId: HYDRATION_ACTION_GROUP,
-                extra,
-                channelId: HYDRATION_NOTIFICATION_CHANNEL,
-              },
-            ],
-          });
-        }
-      }
-    });
-
     isInitialized = true;
-    console.log('[NativeReminders] Native Android Notification Service initialized successfully.');
+    console.log('[NativeReminders] CareSync Native Android Alarm System initialized.');
   } catch (err) {
-    console.error('[NativeReminders] Error initializing native notifications:', err);
+    console.error('[NativeReminders] Error initializing native alarms:', err);
   }
 }
 
 /**
- * Schedule a native Android local notification alarm for a specific medication dose.
+ * Syncs any actions recorded natively by CareSyncActionReceiver while the app was closed.
+ */
+export async function syncNativePendingActions() {
+  if (!Capacitor.isNativePlatform()) return;
+  try {
+    const res = await CareSyncNativeAlarm.getPendingActions();
+    if (res && res.actions && res.actions.length > 0) {
+      console.log(`[NativeReminders] Found ${res.actions.length} pending native actions to sync:`, res.actions);
+      for (const act of res.actions) {
+        if (act.type === 'log_medication') {
+          const medId = act.endpoint.split('/')[3] || 'm-1';
+          try {
+            await logMedicationDoseApi(medId, 'taken', act.payload?.takenAt);
+            if (onDoseConfirmedHandler) onDoseConfirmedHandler(medId);
+          } catch {
+            queueOfflineAction({ type: 'log_medication', endpoint: act.endpoint, payload: act.payload });
+          }
+        } else if (act.type === 'log_hydration') {
+          const amount = act.payload?.amountMl || 250;
+          try {
+            await logHydrationApi(amount);
+            if (onWaterConfirmedHandler) onWaterConfirmedHandler(amount);
+          } catch {
+            queueOfflineAction({ type: 'log_hydration', endpoint: act.endpoint, payload: act.payload });
+          }
+        }
+      }
+    }
+  } catch (err) {
+    console.warn('[NativeReminders] Could not retrieve pending native actions:', err);
+  }
+}
+
+/**
+ * Schedule an exact native Android AlarmManager alarm.
  */
 export async function scheduleNativeMedicationAlarm(
   medicationId: string,
@@ -266,34 +175,36 @@ export async function scheduleNativeMedicationAlarm(
   scheduledTime: Date,
   instructions?: string
 ) {
+  const triggerTime = scheduledTime.getTime();
+  const notificationId = 100000 + (Math.abs(hashCode(`${medicationId}_${triggerTime}`)) % 799999);
+
   if (!Capacitor.isNativePlatform()) {
     console.log(`[NativeReminders:Web Simulation] Native reminder set for ${medicationName} at ${scheduledTime.toLocaleTimeString()}`);
     return;
   }
 
-  const notificationId = 100000 + (Math.abs(hashCode(`${medicationId}_${scheduledTime.getTime()}`)) % 799999);
-
-  await LocalNotifications.schedule({
-    notifications: [
-      {
-        title: '🔔 Medication Alarm',
-        body: `💊 ${medicationName} (${dosage}) is scheduled now.`,
-        id: notificationId,
-        schedule: { at: scheduledTime, allowWhileIdle: true },
-        sound: 'beep.wav',
-        actionTypeId: MEDICATION_ACTION_GROUP,
-        extra: {
-          medicationId,
-          medicationName,
-          dosage,
-          instructions,
-          scheduledTime: scheduledTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-          type: 'medication',
-        },
-        channelId: MEDICATION_NOTIFICATION_CHANNEL,
+  try {
+    // 1. Schedule via dedicated Native Android AlarmManager Plugin
+    await CareSyncNativeAlarm.scheduleAlarm({
+      id: notificationId,
+      type: 'medication',
+      title: '🔔 Medication Alarm',
+      body: `💊 ${medicationName} (${dosage}) is scheduled now.`,
+      triggerTime,
+      extra: {
+        medicationId,
+        medicationName,
+        dosage,
+        instructions,
+        scheduledTime: scheduledTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        type: 'medication',
       },
-    ],
-  });
+    });
+
+    console.log(`[NativeReminders] Scheduled exact AlarmClock for ${medicationName} at ${scheduledTime.toLocaleTimeString()} (id: ${notificationId})`);
+  } catch (err) {
+    console.error('[NativeReminders] Error scheduling native medication alarm:', err);
+  }
 }
 
 /**
@@ -306,11 +217,7 @@ export async function syncNativeMedicationAlarms(
   if (userRole !== 'patient') {
     if (Capacitor.isNativePlatform()) {
       try {
-        const pending = await LocalNotifications.getPending();
-        const medNotifications = pending.notifications.filter((n) => n.id < 900000);
-        if (medNotifications.length > 0) {
-          await LocalNotifications.cancel({ notifications: medNotifications });
-        }
+        await CareSyncNativeAlarm.cancelAllAlarms();
       } catch (err) {
         console.error('[NativeReminders] Error clearing caregiver alarms:', err);
       }
@@ -326,12 +233,6 @@ export async function syncNativeMedicationAlarms(
   }
 
   try {
-    const pending = await LocalNotifications.getPending();
-    const medNotifications = pending.notifications.filter((n) => n.id < 900000);
-    if (medNotifications.length > 0) {
-      await LocalNotifications.cancel({ notifications: medNotifications });
-    }
-
     for (const med of activeMeds) {
       const match = med.scheduledTime.match(/(\d+):(\d+)\s*(AM|PM)?/i);
       if (!match) continue;
@@ -362,7 +263,6 @@ export async function syncNativeMedicationAlarms(
 
 /**
  * Synchronize native hydration reminder schedule on patient device.
- * Supports multi-slot discrete schedules as well as interval settings fallback.
  */
 export async function syncNativeHydrationReminders(
   settings: HydrationSettings,
@@ -370,17 +270,6 @@ export async function syncNativeHydrationReminders(
   schedules: HydrationSchedule[] = []
 ) {
   if (userRole !== 'patient' || !settings.reminderEnabled) {
-    if (Capacitor.isNativePlatform()) {
-      try {
-        const pending = await LocalNotifications.getPending();
-        const hydrationPending = pending.notifications.filter((n) => n.id >= 900000);
-        if (hydrationPending.length > 0) {
-          await LocalNotifications.cancel({ notifications: hydrationPending });
-        }
-      } catch (err) {
-        console.error('[NativeReminders] Error cancelling hydration reminders:', err);
-      }
-    }
     return { scheduledCount: 0, enabled: false };
   }
 
@@ -391,17 +280,10 @@ export async function syncNativeHydrationReminders(
   }
 
   try {
-    const pending = await LocalNotifications.getPending();
-    const hydrationPending = pending.notifications.filter((n) => n.id >= 900000);
-    if (hydrationPending.length > 0) {
-      await LocalNotifications.cancel({ notifications: hydrationPending });
-    }
-
-    const notificationsToSchedule = [];
     const now = new Date();
-
-    // 1. If user configured discrete multi-slot schedules, use those
     const enabledSlots = schedules.filter((s) => s.enabled);
+    let count = 0;
+
     if (enabledSlots.length > 0) {
       let index = 0;
       for (const slot of enabledSlots) {
@@ -422,14 +304,12 @@ export async function syncNativeHydrationReminders(
         }
 
         const reminderId = 900000 + index;
-        notificationsToSchedule.push({
+        await CareSyncNativeAlarm.scheduleAlarm({
           id: reminderId,
-          title: '💧 Hydration Reminder',
-          body: `Drink ${slot.amountMl} ml of water to stay hydrated!`,
-          schedule: { at: targetDate, allowWhileIdle: true },
-          channelId: HYDRATION_NOTIFICATION_CHANNEL,
-          actionTypeId: HYDRATION_ACTION_GROUP,
-          sound: 'beep.wav',
+          type: 'hydration',
+          title: '💧 Hydration Alarm',
+          body: `Drink ${slot.amountMl} ml of water to reach your hydration goal!`,
+          triggerTime: targetDate.getTime(),
           extra: {
             type: 'hydration',
             scheduleId: slot.id,
@@ -438,16 +318,16 @@ export async function syncNativeHydrationReminders(
           },
         });
         index++;
+        count++;
       }
     } else {
-      // 2. Fallback: generate interval slots
+      // Interval fallback
       const [startH, startM] = (settings.startTime || '08:00').split(':').map(Number);
       const [endH, endM] = (settings.endTime || '20:00').split(':').map(Number);
-
       const intervalMs = (settings.intervalMinutes || 60) * 60 * 1000;
+
       const startDate = new Date();
       startDate.setHours(startH, startM, 0, 0);
-
       const endDate = new Date();
       endDate.setHours(endH, endM, 0, 0);
 
@@ -457,35 +337,58 @@ export async function syncNativeHydrationReminders(
       while (currentTime <= endDate.getTime() && index < 20) {
         if (currentTime > now.getTime()) {
           const reminderId = 900000 + index;
-          notificationsToSchedule.push({
+          await CareSyncNativeAlarm.scheduleAlarm({
             id: reminderId,
+            type: 'hydration',
             title: '💧 Time for a Water Break',
             body: `Stay refreshed! Drink a glass of water towards your ${settings.dailyGoalLiters}L daily goal.`,
-            schedule: { at: new Date(currentTime), allowWhileIdle: true },
-            channelId: HYDRATION_NOTIFICATION_CHANNEL,
-            actionTypeId: HYDRATION_ACTION_GROUP,
-            sound: 'beep.wav',
+            triggerTime: currentTime,
             extra: {
               type: 'hydration',
               amountMl: 250,
               scheduledTime: new Date(currentTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
             },
           });
+          count++;
         }
         currentTime += intervalMs;
         index++;
       }
     }
 
-    if (notificationsToSchedule.length > 0) {
-      await LocalNotifications.schedule({ notifications: notificationsToSchedule });
-      console.log(`[NativeReminders] Scheduled ${notificationsToSchedule.length} hydration reminders.`);
-    }
-
-    return { scheduledCount: notificationsToSchedule.length, enabled: true };
+    console.log(`[NativeReminders] Scheduled ${count} native hydration alarms.`);
+    return { scheduledCount: count, enabled: true };
   } catch (err) {
-    console.error('[NativeReminders] Error scheduling hydration reminders:', err);
+    console.error('[NativeReminders] Error scheduling hydration alarms:', err);
     return { scheduledCount: 0, enabled: false };
+  }
+}
+
+/**
+ * Diagnostic helper to get Android alarm status for UI
+ */
+export async function getNativeAlarmDiagnostics() {
+  if (!Capacitor.isNativePlatform()) {
+    return {
+      notificationPermission: 'GRANTED (Web)',
+      exactAlarmPermission: 'NOT_APPLICABLE (Web)',
+      batteryOptimization: 'NOT_APPLICABLE',
+      pendingAlarmsCount: 0,
+      sdkVersion: 0,
+      backendUrl: 'https://caresync-backend-zobp.onrender.com',
+    };
+  }
+  try {
+    return await CareSyncNativeAlarm.getDiagnostics();
+  } catch {
+    return {
+      notificationPermission: 'UNKNOWN',
+      exactAlarmPermission: 'UNKNOWN',
+      batteryOptimization: 'UNKNOWN',
+      pendingAlarmsCount: 0,
+      sdkVersion: 0,
+      backendUrl: 'https://caresync-backend-zobp.onrender.com',
+    };
   }
 }
 
