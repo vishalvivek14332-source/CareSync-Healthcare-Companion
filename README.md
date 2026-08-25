@@ -78,7 +78,7 @@ cp .env.example .env
 ```bash
 npm run dev
 ```
-Open [http://localhost:3000](http://localhost:3000) to view the web application.
+Open [http://localhost:3000](http://localhost:3000)
 
 ### 4. Build Web & Server Bundle
 ```bash
