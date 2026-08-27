@@ -109,4 +109,4 @@ npx tsx tests/postgres.test.ts     # Database Abstraction & PostgreSQL Tests
 
 ## License
 
-No license is currently specified for this repository. All rights reserved.
+No license is currently specified for this repository.
