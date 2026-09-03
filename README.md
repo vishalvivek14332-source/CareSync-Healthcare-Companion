@@ -25,7 +25,7 @@ CareSync is a healthcare companion application designed to help patients manage 
 | Layer | Technologies |
 |---|---|
 | **Frontend** | React 19, TypeScript, Vite 6, Tailwind CSS, Lucide React, Motion |
-| **Mobile Runtime** | Capacitor 8 (`@capacitor/core`, `@capacitor/android`, `@capacitor/local-notifications`, `@capacitor/haptics`) |
+| **Mobile Runtime** | Capacitor 8 (`@capacitor/core`, `@capacitor/android`, `@capacitor/local-notifications`) |
 | **Android Native** | Java, Android SDK 36 (Min SDK 24), `AlarmManager`, `BroadcastReceiver`, `KeyguardManager`, `PowerManager` |
 | **Backend & API** | Node.js, Express 4, TypeScript, Helmet, CORS, Rate Limiting, JWT Auth, `bcryptjs` |
 | **Database** | PostgreSQL 16+ via `pg` (Production) / SQLite via `better-sqlite3` in WAL mode (Dev & Test) |
