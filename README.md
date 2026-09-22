@@ -60,7 +60,7 @@ flowchart LR
 ### Prerequisites
 - **Node.js**: v18.x or v20
 - **JDK**: JDK 17 or JDK 21 (Required for Android )
-- **Android Studio & SDK**: Android SDK 36 (Platform-Tools, Build-Tools)
+- **Android Studio & SDK**: Android SDK 36 
 
 ### 1. Clone & Install Dependencies
 ```bash
