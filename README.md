@@ -1,4 +1,4 @@
-# CareSync 🩺🤖
+# CareSync 🩺🤝
 
 CareSync is a healthcare companion application designed to help patients manage daily medication schedules and hydration routines while allowing caregivers to stay connected in real time. Built with React, TypeScript, Capacitor, and native Android components, CareSync provides reliable background alarms that wake locked devices, deterministic wellness scoring via CareScore, offline action queuing, and multi-tier caregiver escalation alerts.
 
